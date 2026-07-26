@@ -206,7 +206,7 @@ function runCodeQualityTools(bool $fixMode = false): void
     run('sh tests/Shell/install_script_test.sh');
 
     io()->section('PHPUnit');
-    run('docker compose exec php vendor/bin/phpunit --coverage-clover=build/coverage/clover.xml');
+    run('docker compose exec php sh -c "php -d memory_limit=512M vendor/bin/phpunit --coverage-clover=build/coverage/clover.xml"');
 
     io()->section('Infection');
     run('docker compose exec php php -d memory_limit=1G bin/infection');
