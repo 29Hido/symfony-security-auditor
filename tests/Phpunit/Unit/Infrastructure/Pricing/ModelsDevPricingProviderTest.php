@@ -13,6 +13,7 @@ declare(strict_types=1);
 
 namespace VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Infrastructure\Pricing;
 
+use JsonException;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
@@ -279,6 +280,40 @@ final class ModelsDevPricingProviderTest extends TestCase
         self::assertFalse($modelsDevPricingProvider->hasModel('claude-opus-4-8'));
         self::assertSame(0.0, $modelsDevPricingProvider->pricePerMillionInputTokens('claude-opus-4-8'));
         self::assertContains('models.dev pricing catalog unavailable; cost reporting disabled', array_column($this->loggedWarnings, 0));
+    }
+
+    /**
+     * @throws JsonException
+     */
+    public function test_it_memoizes_the_catalog_and_loads_it_only_once(): void
+    {
+        $tempFile = sys_get_temp_dir().'/models_dev_test_'.uniqid('', true).'.json';
+
+        file_put_contents($tempFile, json_encode([
+            'anthropic' => [
+                'models' => [
+                    'memoized-model' => [
+                        'cost' => ['input' => 10.0, 'output' => 20.0],
+                    ],
+                ],
+            ],
+        ], \JSON_THROW_ON_ERROR));
+
+        try {
+            $modelsDevPricingProvider = new ModelsDevPricingProvider($this->warningCapturingLogger(), $tempFile);
+
+            self::assertTrue($modelsDevPricingProvider->hasModel('memoized-model'));
+            self::assertSame(10.0, $modelsDevPricingProvider->pricePerMillionInputTokens('memoized-model'));
+
+            unlink($tempFile);
+
+            self::assertTrue($modelsDevPricingProvider->hasModel('memoized-model'));
+            self::assertSame(10.0, $modelsDevPricingProvider->pricePerMillionInputTokens('memoized-model'));
+        } finally {
+            if (file_exists($tempFile)) {
+                unlink($tempFile);
+            }
+        }
     }
 
     private function providerForCatalog(string $fixture): ModelsDevPricingProvider
