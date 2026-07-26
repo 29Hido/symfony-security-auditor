@@ -209,7 +209,7 @@ function runCodeQualityTools(bool $fixMode = false): void
     run('docker compose exec php vendor/bin/phpunit --coverage-clover=build/coverage/clover.xml');
 
     io()->section('Infection');
-    run('docker compose exec php php -d memory_limit=1G bin/infection');
+    run('docker compose exec php php -d memory_limit=2G bin/infection');
 
     io()->success($fixMode ? 'Fixing complete.' : 'Linting complete.');
 }
