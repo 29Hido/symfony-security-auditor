@@ -143,7 +143,7 @@ No. We recommend the layered approach:
 
 ### How accurate is it?
 
-Accuracy depends on the LLM model. Stronger models (Claude Opus, GPT-5.4, Gemini
+Accuracy depends on the LLM model. Stronger models (Claude Opus, GPT-5.6, Gemini
 3 Pro) produce fewer false positives and catch deeper flaws. The Reviewer agent
 filters Attacker output — only `reviewer_validated` findings appear in the final
 report.
@@ -190,7 +190,7 @@ prompt caching enabled (default):
 | Claude Fable 5 only                 | $6 – $16             |
 | Claude Opus only                    | $3 – $8              |
 | Claude Opus + Haiku (split-model)   | $0.50 – $2           |
-| GPT-5.4 only                        | $3 – $8              |
+| GPT-5.6 only                        | $3 – $8              |
 | DeepSeek / Mistral / Ollama (local) | ~$0 / $0             |
 
 Tips: set `profile: fast` (one attacker iteration, lean pre-scan, code slicing,
@@ -306,9 +306,10 @@ prompt receives the resulting CVE summaries, not your dependency list itself.
 | Goal              | Recommended setup                                                               |
 | ----------------- | ------------------------------------------------------------------------------- |
 | Most demanding    | `attacker_model: claude-fable-5` + `reviewer_model: claude-haiku-4-5-20251001`  |
-| Highest accuracy  | `attacker_model: claude-opus-4-8` + `reviewer_model: claude-opus-4-8`           |
-| Best cost/quality | `attacker_model: claude-opus-4-8` + `reviewer_model: claude-haiku-4-5-20251001` |
-| Cheapest paid     | `model: deepseek-chat` or `mistral-large`                                       |
+| Highest accuracy  | `attacker_model: claude-opus-5` + `reviewer_model: claude-opus-5`               |
+| Best cost/quality | `attacker_model: claude-opus-5` + `reviewer_model: claude-haiku-4-5-20251001`   |
+| Strong + cheaper  | `attacker_model: claude-sonnet-5` + `reviewer_model: claude-haiku-4-5-20251001` |
+| Cheapest paid     | `model: deepseek-chat` or `mistral-large-latest`                                |
 | Offline / free    | `model: llama3.3` via Ollama                                                    |
 | Enterprise        | Azure OpenAI / AWS Bedrock with split-model                                     |
 
@@ -330,14 +331,14 @@ split-model setup above plus per-agent model options (see
 - **Attacker — favour capability and reasoning depth.** It runs a long-horizon,
   recall-sensitive search across the whole codebase, so it benefits from a more
   capable model and higher reasoning effort. On models that expose an `effort`
-  option (e.g. Claude Opus 4.7+/Fable 5, where `high`/`xhigh` are the sweet spot
-  for this kind of work) or an adaptive `thinking` option, set it on the
-  attacker:
+  option (e.g. Claude Opus 5, Sonnet 5 and Fable 5, where `high`/`xhigh` are the
+  sweet spot for this kind of work) or an adaptive `thinking` option, set it on
+  the attacker:
 
   ```yaml
   symfony_security_auditor:
       attacker_model:
-          name: 'claude-opus-4-8'
+          name: 'claude-opus-5'
           options:
               effort: 'high'
       reviewer_model:
@@ -380,12 +381,12 @@ Other params (e.g. `temperature`) flow through the model name:
 ```yaml
 # Query-string
 symfony_security_auditor:
-    model: 'claude-opus-4-8?temperature=0.1'
+    model: 'claude-haiku-4-5-20251001?temperature=0.1'
 
 # Expanded
 symfony_security_auditor:
     model:
-        name: 'claude-opus-4-8'
+        name: 'claude-haiku-4-5-20251001'
         options:
             temperature: 0.1
 ```
