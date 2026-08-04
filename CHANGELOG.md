@@ -12,6 +12,23 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org). See
 
 ### Added
 
+- **`FrameworkVocabulary` lifts the framework wording out of the synthesizer
+  prompt literals.** `PoCSynthesizer` and `FixSynthesizer` are portable in every
+  respect except their prompts, which named Symfony directly: "confirmed Symfony
+  vulnerabilities" and "Twig SSTI / XSS"
+  (`src/Audit/Application/Agent/PoCSynthesizer.php`), "senior Symfony security
+  engineer" and a hard-coded "parameterized Doctrine query, `#[IsGranted]`, …"
+  idiom list (`src/Audit/Application/Agent/FixSynthesizer.php`). That wording
+  was the only thing pinning two otherwise framework-neutral classes to Symfony.
+  The new `Audit\Domain\Model\FrameworkVocabulary` carries the framework's
+  `name`, the name of its `templateLanguage` and the `idiomaticFixes` a patch
+  should prefer over a hand-rolled guard; both synthesizers accept one as an
+  optional fourth constructor argument and interpolate it into their system
+  prompts. The default describes Symfony, so every existing caller — including
+  the container wiring in `config/services.php`, which is unchanged — produces
+  the same prompts it did before. Auditing a non-Symfony PHP application no
+  longer requires forking either class.
+
 - **`ApplicationSecurityMap` names the project survey after what each surface
   _is_.** `SymfonyMapping` is a BC-covered Domain model whose name and most of
   its 19 accessors hard-code Symfony vocabulary (`voterCapabilities()`,
@@ -187,6 +204,29 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org). See
   [`docs/versioning.md`](docs/versioning.md).
 
 ### Fixed
+
+- **Standalone configuration resolves `%env(...)%` placeholders outside the
+  `platform` block.** `StandaloneConfigLoader::load()` splits the raw YAML into
+  a platform block and everything else (`array_diff_key($rawConfig, ...)`), and
+  only the platform block was env-expanded — by
+  `StandalonePlatformConfigResolver::resolveValue()`. The remaining audit
+  configuration reached the container verbatim, where
+  `StandaloneContainerFactory` built its `ContainerBuilder` with a plain
+  `ParameterBag`, which has no env-placeholder machinery at all. A standalone
+  config declaring `model: '%env(SSA_MODEL)%'` therefore aborted with:
+
+  ```text
+  The parameter "symfony_security_auditor.attacker_model" has a dependency on a non-existent parameter "env(SSA_MODEL)".
+  ```
+
+  even though `symfony-security-auditor init` itself writes `%env(...)%` into
+  that same file for the platform API key and so presents it as the idiom for
+  the whole config. `StandaloneContainerFactory` now uses an
+  `EnvPlaceholderParameterBag` and compiles with
+  `ContainerBuilder::compile(true)`, so every `%env(...)%` in a standalone
+  config resolves at compile time. Configs that only used `%env(...)%` for the
+  platform API key are unaffected — that path was already resolved before
+  reaching the container.
 
 - **CI resolves the root package version deterministically.** Restoring
   `extra.branch-alias` was not enough: an alias only applies when its key
