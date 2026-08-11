@@ -23,9 +23,9 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\CodeSlicerInterface;
 
 /**
  * Assembles the per-chunk system/user prompts (risk markers + cross-iteration
- * preambles), slices each file to its security-relevant lines, and derives the
- * cache key and cacheability. Shared by the sequential and concurrent chunk
- * analyzers.
+ * preambles), slices each file to its security-relevant lines, and derives
+ * cacheability from the cache key {@see ChunkContextKeyDeriver} computes.
+ * Shared by the sequential and concurrent chunk analyzers.
  *
  * @internal not part of the BC promise — see docs/versioning.md
  */
@@ -35,6 +35,7 @@ final readonly class ChunkContextFactory
         private AttackerPromptBuilderInterface $attackerPromptBuilder,
         private CodeSlicerInterface $codeSlicer,
         private AttackerContextPromptRenderer $attackerContextPromptRenderer,
+        private ChunkContextKeyDeriver $chunkContextKeyDeriver,
     ) {}
 
     /**
@@ -47,7 +48,7 @@ final readonly class ChunkContextFactory
 
         $rejectedPreamble = $this->renderRejectedPreamble($attackerAnalysisRequest);
         $previousPreamble = $this->renderPreviousPreamble($attackerAnalysisRequest);
-        $contextKey = $this->deriveContextKey($markerPreamble, $rejectedPreamble, $previousPreamble);
+        $contextKey = $this->chunkContextKeyDeriver->derive($markerPreamble, $rejectedPreamble, $previousPreamble, $attackerAnalysisRequest->symfonyMapping);
         $cacheable = $this->isCacheable($attackerAnalysisRequest, $contextKey, $cacheIsContextAware);
 
         $slicedChunk = $this->sliceChunk($chunk, $riskMarkerIndex);
@@ -86,29 +87,6 @@ final readonly class ChunkContextFactory
         }
 
         return $this->attackerContextPromptRenderer->renderPreviousFindings($attackerAnalysisRequest->previousFindings);
-    }
-
-    /**
-     * Hashing each preamble individually before joining fixes each to 64 hex
-     * characters, which can never contain the raw-text join's own separator —
-     * so a rejected/previous preamble embedding a null byte (both are
-     * rendered from LLM-echoed `Vulnerability::filePath()` values, which are
-     * never null-byte-sanitized) can't shift content across the join
-     * boundary and collide with a genuinely different triple. Mirrors
-     * `FilesystemAttackerCache::keyForChunk()`'s per-file hash-then-join.
-     *
-     * The marker preamble is included so a chunk cache entry is invalidated
-     * whenever the risk markers it was built from change — e.g. a custom
-     * `StaticPreScannerInterface` implementation (a documented extension
-     * point) starts flagging a file differently on an unchanged content hash.
-     */
-    private function deriveContextKey(string $markerPreamble, string $rejectedPreamble, string $previousPreamble): string
-    {
-        if ('' === $markerPreamble && '' === $rejectedPreamble && '' === $previousPreamble) {
-            return '';
-        }
-
-        return hash('sha256', hash('sha256', $markerPreamble).hash('sha256', $rejectedPreamble).hash('sha256', $previousPreamble));
     }
 
     private function isCacheable(AttackerAnalysisRequest $attackerAnalysisRequest, string $contextKey, bool $cacheIsContextAware): bool

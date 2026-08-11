@@ -333,6 +333,77 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org). See
 
 ### Fixed
 
+- **`audit.budget.max_tokens` did not bound a run's real token spend once
+  provider prompt caching was involved.** `LLMResponse::totalTokens()`
+  (`src/Audit/Domain/Port/LLMResponse.php`) returned only
+  `inputTokens + outputTokens`, and `BudgetTracker::recordCall()`
+  (`src/Audit/Application/Budget/BudgetTracker.php`) sums exactly that value to
+  compare against the configured cap — so a call's `cacheReadTokens` and
+  `cacheCreationTokens` were consumed, billed (`CostCalculator::costForCall()`
+  already prices all four counters correctly), and never counted toward the cap
+  that is supposed to abort the run. A caching-heavy audit — the default, since
+  `cache.enabled` is on — could run well past a configured
+  `audit.budget.max_tokens` without ever tripping `BudgetExceededException`.
+  `totalTokens()` now sums all four counters. Fixing a run's token accounting
+  means `audit.budget.max_tokens` now trips earlier than it used to appear to,
+  which is the guard working correctly for the first time, not a change to what
+  the option promises.
+
+- **A persisted attacker chunk cache entry could outlive the mapping it was
+  computed under.** `ChunkContextFactory::create()` derives a chunk's cache key
+  from file content plus a `contextKey` hashed from the marker/rejected/previous
+  preambles, but `AttackerPromptBuilder::buildUserMessage()` also folds the
+  `SymfonyMapping` — firewall rules, the route access-control map, voter
+  coverage, form bindings, controllers without a voter — straight into the
+  prompt, and none of that ever reached the key
+  (`src/Audit/Application/Agent/Chunk/ChunkContextFactory.php`). A
+  `security.yaml` edit or a voter added elsewhere in the project could leave a
+  specific file's own content untouched while changing whether the attacker
+  would flag it — and `FilesystemAttackerCache` would keep serving the verdict
+  computed under the old mapping indefinitely.
+  `ChunkContextKeyDeriver::derive()`
+  (`src/Audit/Application/Agent/Chunk/ChunkContextKeyDeriver.php`) now folds in
+  a fingerprint of that same access-control data, sorted before hashing so two
+  scans of an unchanged codebase still agree despite `Finder` making no ordering
+  guarantee, and stays the empty string when the mapping carries none of it — so
+  a mapping-less test double or a project with no routes at all keeps today's
+  full cacheability. A custom, non-context-aware `AttackerCacheInterface`
+  implementation will now see chunks skipped (per the existing, documented
+  fallback) far more often than before, since a real Symfony project's mapping
+  is rarely empty — the alternative was letting such a cache keep serving stale
+  verdicts, which is the exact bug this closes.
+
+- **A finding whose LLM tool call omitted `line_start` could silently overwrite
+  an unrelated finding.** `Vulnerability`'s id is deterministic —
+  `VULN-{sha1(type+filePath+lineStart)[0..7]}` — and `line_start` was absent
+  from `record_vulnerability`'s `required` list
+  (`src/Audit/Infrastructure/Tool/RecordVulnerabilityTool.php`), so the provider
+  accepted a tool call that omitted it.
+  `VulnerabilityFactory::buildVulnerability()` then defaulted the missing value
+  to `1`, and `AuditContext::addVulnerability()` keys its findings map by id —
+  so two distinct findings of the same type in the same file collided onto one
+  id the moment either omitted `line_start`, and only the last one written to
+  the map survived. `line_start` is now required, so the provider validates
+  every tool call against it before invocation and the omission is structurally
+  impossible, matching how `confidence` and `title` were already required for
+  the same reason. `line_end` stays optional — it legitimately defaults to
+  `line_start` for a single-line finding and plays no part in the id.
+
+- **An audit that examined no files no longer reports a clean bill of health.**
+  A run whose scan found nothing — a mistyped `project-path`, a
+  `scan.included_paths` entry matching no directory, an over-broad
+  `excluded_paths` — produced a report with zero findings, and every downstream
+  signal read that as success: `riskLevel` SAFE, `normalizedScore()` 100, grade
+  A, and `AuditExitCodeResolver::resolve()` returning `0` even under
+  `--fail-on=low --min-score=90`. A CI gate configured exactly as the docs
+  recommend went green having audited nothing. `ReportIdentity` now also carries
+  `filesDiscovered` — what the scan found, before a `--since` diff narrows it —
+  exposed as `AuditReport::filesDiscovered()`, and the resolver fails a run
+  whose value is `0` regardless of the thresholds. A `--since` run whose diff
+  left nothing changed still exits `0`, because there the scan did find files;
+  the two cases were previously indistinguishable, since `filesScanned` is the
+  post-diff count.
+
 - **A failing audit no longer blames the `--fail-on` threshold for a
   `--min-score` failure.** `AuditExitCodeResolver::resolve()` fails a run when
   the risk gate **or** the independent `--min-score` gate trips, but only the
