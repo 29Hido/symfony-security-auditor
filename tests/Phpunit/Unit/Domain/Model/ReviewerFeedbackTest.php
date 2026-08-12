@@ -62,6 +62,39 @@ final class ReviewerFeedbackTest extends TestCase
         );
     }
 
+    public function test_the_digest_does_not_collide_when_one_reason_embeds_another_entrys_whole_line(): void
+    {
+        $separateEntries = new ReviewerFeedback([
+            new AcceptedFindingFeedback('sql_injection', 'src/A.php', 'Title', 'X'),
+            new AcceptedFindingFeedback('sql_injection', 'src/B.php', 'TitleB', 'Y'),
+        ]);
+        $singleEntryEmbeddingTheOthersBoundary = new ReviewerFeedback([
+            new AcceptedFindingFeedback('sql_injection', 'src/A.php', 'Title', "Xsql_injection\0src/B.php\0TitleB\0Y"),
+        ]);
+
+        self::assertNotSame($separateEntries->digest(), $singleEntryEmbeddingTheOthersBoundary->digest());
+    }
+
+    public function test_the_digest_changes_when_the_type_changes(): void
+    {
+        $sqlInjection = new ReviewerFeedback([new AcceptedFindingFeedback('sql_injection', 'src/A.php', 'Title', 'accepted risk')]);
+        $xss = new ReviewerFeedback([new AcceptedFindingFeedback('xss', 'src/A.php', 'Title', 'accepted risk')]);
+
+        self::assertNotSame($sqlInjection->digest(), $xss->digest());
+    }
+
+    public function test_the_digest_does_not_collide_when_a_nul_byte_shifts_a_value_across_the_file_and_title_boundary(): void
+    {
+        $fileEndsWithNulTitle = new ReviewerFeedback([
+            new AcceptedFindingFeedback('sql_injection', "src/A.php\0EvilTitle", 'reason-x', 'r'),
+        ]);
+        $titleStartsAfterTheSameNul = new ReviewerFeedback([
+            new AcceptedFindingFeedback('sql_injection', 'src/A.php', "EvilTitle\0reason-x", 'r'),
+        ]);
+
+        self::assertNotSame($fileEndsWithNulTitle->digest(), $titleStartsAfterTheSameNul->digest());
+    }
+
     private function feedback(string $reason): ReviewerFeedback
     {
         return new ReviewerFeedback([new AcceptedFindingFeedback('sql_injection', 'src/A.php', 'Title', $reason)]);

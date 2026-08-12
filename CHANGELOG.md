@@ -407,6 +407,65 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org). See
   passphrase appears in a committed config — were sent verbatim. Added to all
   three patterns.
 
+- **Azure Storage connection strings, `Authorization: Bearer` headers, and
+  OpenAI-style `sk-`/`sk-proj-` keys, and Slack incoming webhook URLs are now
+  redacted.** `RegexSecretScrubber::DEFAULT_PATTERNS`
+  (`src/Audit/Infrastructure/FileSystem/RegexSecretScrubber.php`) had no pattern
+  for any of these four common credential shapes: an `AccountKey=<base64>`
+  connection-string segment matches neither `env_assignment`'s all-caps keyword
+  rule nor `inline_assignment`'s fixed keyword list (mixed-case, no separator
+  before `Key`); a bare `Bearer <token>` header/curl argument and a bare
+  `sk-`/`sk-proj-` key with no enclosing `key=`/`token=` assignment matched
+  nothing; and a Slack incoming webhook URL is itself the credential, while only
+  OAuth-style `xox*` tokens were covered. All four would have reached the LLM
+  provider and any generated report verbatim. Added `account[_-]?key` to the
+  `inline_assignment`/ `multiline_assignment` keyword alternations, and three
+  new patterns/labels: `bearer_token`, `openai_api_key`, `slack_webhook_url`.
+
+- **A `security.yaml` access-control path or a serialized route/voter/form
+  signature spanning two entries could replay a stale attacker verdict.**
+  `ChunkContextKeyDeriver::mappingFingerprint()`
+  (`src/Audit/Application/Agent/Chunk/ChunkContextKeyDeriver.php`) joined its
+  sorted signature list with `implode("\n", $signatures)` before a single
+  `hash()` call — the same naive-concatenation anti-pattern
+  `Vulnerability::fingerprintOf()`/`generateId()` were already fixed to avoid,
+  just not applied here. A firewall rule, route-access-control, voter, or form
+  signature containing a literal newline (parsed from a double-quoted YAML
+  string) could make two materially different security configurations
+  fingerprint identically, so the `AttackerChunkCache` replayed a "no
+  vulnerability" verdict computed under a different, stale security posture for
+  a file whose own content never changed — a false negative. Each signature is
+  now hashed individually before joining, mirroring `derive()`'s own scheme in
+  the same class.
+
+- **A reviewer-feedback reason containing another entry's exact line could
+  replay a stale accept/reject verdict.** `ReviewerFeedback::digest()`
+  (`src/Audit/Domain/Model/ReviewerFeedback.php`) had the identical
+  naive-concatenation weakness: it joined per-entry `\0`-separated lines with
+  `implode("\n", $lines)` before a single `hash()` call. Since an entry's
+  `title`/`file`/`reason` (LLM- or filesystem-path-sourced) can embed another
+  entry's whole line, two genuinely different feedback sets could digest
+  identically, letting `FilesystemReviewerCache` silently fail to invalidate a
+  verdict after a maintainer's reason change. Each line is now hashed
+  individually before joining, mirroring `ChunkContextKeyDeriver::derive()`.
+
+- **A NUL byte in a `file` or `title` could still shift a value across a field
+  boundary within a single entry, in three places the previous fix round
+  missed.** `ReviewerFeedback::digest()` hashed each entry's whole
+  `type\0file\0title\0reason` line, but not each field before joining it into
+  that line — so `file="A\0B", title="C"` and `file="A", title="B\0C"` produced
+  the byte-identical line, and therefore the same digest, despite being
+  genuinely different feedback. The same idiom, with the same gap, existed in
+  `CompositeReviewerFeedbackProvider::deduplicated()`
+  (`src/Audit/Infrastructure/Prompt/Reviewer/`) — used to merge baseline and
+  triage-memory feedback, where a collision silently drops one finding's
+  guidance — and in `FilesystemTriageMemoryStore::keyOf()`
+  (`src/Audit/Infrastructure/Cache/`) — used to dedupe persisted rejections,
+  where a collision silently drops a reviewer's rejection reason for a genuinely
+  distinct finding. All three now hash `type`, `file`, `title` (and, for the
+  memory store, `line`) individually before joining, matching
+  `ChunkContextKeyDeriver::derive()`.
+
 ### Fixed
 
 - **A crafted file path could still forge a fake prompt section using a carriage
