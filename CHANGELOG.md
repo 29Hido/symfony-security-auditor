@@ -466,6 +466,49 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org). See
   memory store, `line`) individually before joining, matching
   `ChunkContextKeyDeriver::derive()`.
 
+- **An audited repository's own `scan.included_paths` entry could read and
+  exfiltrate an arbitrary file on the audit host.**
+  `ProjectFileScanner::resolveIncludedPaths()`
+  (`src/Audit/Infrastructure/FileSystem/ProjectFileScanner.php`) resolved each
+  configured path with plain string concatenation
+  (`$projectPath.DIRECTORY_SEPARATOR.$includedPath`), with no check that the
+  result stayed inside the project root. A `scan.included_paths` entry such as
+  `../outside/secret.php` — settable from `config/packages/` in bundle mode, or
+  a target repository's own project config in standalone mode — resolved to a
+  path outside the audited project, and its full contents were then sent to the
+  LLM provider like any other scanned file (past best-effort secret scrubbing,
+  which only redacts known credential shapes, not arbitrary content). A resolved
+  path is now checked against the canonicalized project root and skipped with a
+  warning if it escapes, mirroring the existing symlink-escape guard.
+
+- **A project config can no longer point the SARIF importer at a file of its
+  choosing.** `scan.import_sarif` accepts absolute paths by design (SARIF
+  reports commonly live outside the audited repository, e.g. in a CI artifacts
+  directory), so sandboxing its path resolution the way `included_paths` was
+  fixed above would have broken that legitimate use. Instead,
+  `StandaloneConfigLoader::readProjectConfig()`
+  (`src/Audit/Infrastructure/Config/StandaloneConfigLoader.php`) now rejects a
+  per-project `.symfony-security-auditor.yaml` that declares `scan.import_sarif`
+  at all, the same way it already rejects `platform`/`provider` — the new
+  `ProjectConfigScanOverrideException`. Configure SARIF imports in the trusted
+  user config instead.
+
+- **A `scan.custom_risk_patterns` entry with a catastrophic-backtracking regex
+  had no safeguard, unlike the sibling `secret_scrubbing.additional_patterns`
+  path.** `RegexStaticPreScanner` stored `customPatterns` with no validation
+  and, on a `preg_match()`/`preg_match_all()` failure (e.g.
+  `pcre.backtrack_limit` exhausted), silently treated it the same as "no match"
+  — reproduced directly: a classic `(a+)+$` pattern against a ~30-character
+  attacker-controlled line exhausts the default backtrack limit in a couple of
+  milliseconds, and since the pattern re-runs per line of every matching file, a
+  repository-supplied pattern plus repository-supplied content scales that into
+  a meaningful CPU-exhaustion DoS against the audit run itself. Each custom
+  pattern is now validated at construction — an empty or syntactically invalid
+  pattern throws the new `InvalidCustomRiskPatternException` — and a runtime
+  evaluation failure now logs a warning and stops evaluating that pattern for
+  the rest of the file, instead of silently repeating a failing, CPU-costly call
+  once per remaining line.
+
 ### Fixed
 
 - **A crafted file path could still forge a fake prompt section using a carriage
