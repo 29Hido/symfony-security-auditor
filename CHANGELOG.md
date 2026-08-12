@@ -333,6 +333,64 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org). See
 
 ### Fixed
 
+- **A crafted file path could still forge a fake prompt section using a carriage
+  return instead of a newline.** `AttackerPromptBuilder::sanitizePathLine()` and
+  `NumberedFileContextRenderer::sanitizePathAttribute()`
+  (`src/Audit/Infrastructure/Prompt/`) stripped `\n` from a scanned file's path
+  before embedding it in the attacker prompt, but left `\r` untouched — half of
+  the same defense `AttackerContextPromptRenderer::sanitizeLine()` already
+  applies to risk-marker and prior-finding text. Both now strip `\r` alongside
+  `\n`.
+
+- **A purely-numeric `file_path` crashed the executive summary report.**
+  `ExecutiveSummary::fileCounts()`
+  (`src/Audit/Domain/Model/ExecutiveSummary.php`) keys its hotspot distribution
+  by the LLM-controlled `file_path`, and a canonical-integer string (e.g.
+  `"42"`) becomes an `int` array key under PHP's own array-key rules.
+  `ExecutiveSummaryReportRenderer::countLines()`
+  (`src/Audit/Infrastructure/Report/`) passed that key straight into
+  `sanitize(string $text)`, so `audit:run --format executive` aborted with a
+  `TypeError` the moment any validated finding's file path looked like a number.
+  The label is now cast to `string` before sanitizing.
+
+- **A Unicode bidirectional override in a finding's title survived into the
+  SARIF and JUnit reports.** Neither `SarifReportRenderer::resultFor()` nor
+  `JunitReportRenderer::stripIllegalXmlCharacters()`
+  (`src/Audit/Infrastructure/Report/`) stripped bidi control characters — a bidi
+  override is valid JSON text and valid XML text, so it survived round-tripping
+  into `message.text` (SARIF) and the testcase name/failure text (JUnit)
+  unchanged, letting a crafted finding visually reorder how its own title reads
+  in GitHub Code Scanning or a JUnit-consuming CI viewer. Both renderers now run
+  the affected fields through the same
+  `TerminalTextSanitizer::stripControlCharacters()` the console and Markdown
+  renderers already use.
+
+- **The carriage-return fix above missed three sibling functions that render the
+  same class of attacker-controlled value.**
+  `SymfonyMappingContextRenderer::sanitizeLine()`
+  (`src/Audit/Infrastructure/Prompt/SymfonyMappingContextRenderer.php`) renders
+  a voter's `supports()` string-literal attributes/subjects and
+  `security.yaml`-derived firewall-rule strings — both attacker-controlled — and
+  `ReviewerMessageRenderer::sanitizeFilePath()` / `stripEmbeddedNewline()`
+  (`src/Audit/Infrastructure/Prompt/Reviewer/`) render the attacker LLM's own
+  `file_path` and `title` tool-call arguments. All three stripped `\n` but left
+  a bare `\r` untouched, reopening the same fake `##`-prefixed-section forgery
+  the file-path fix above closed. All three now strip `\r` alongside `\n`.
+
+- **The bidi-override fix above could be bypassed by a single invalid UTF-8 byte
+  anywhere in the same title.**
+  `TerminalTextSanitizer::stripControlCharacters()` runs a `/u`-mode regex,
+  which PHP aborts (returns `null`, silently falling back to the original,
+  unstripped text) the moment its subject contains one invalid byte — every
+  sibling renderer (`HtmlReportRenderer::escape()`, `MarkdownTextEscaper`,
+  `GithubAnnotationsReportRenderer::escapeData()`) already guards against this
+  by scrubbing with `mb_scrub($value, 'UTF-8')` first, but
+  `SarifReportRenderer::resultFor()`
+  (`src/Audit/Infrastructure/Report/SarifReportRenderer.php`) did not, so a
+  title combining one stray byte with a genuine bidi override reached SARIF's
+  `message.text` with the override intact. `resultFor()` now scrubs the title
+  the same way before stripping control characters.
+
 - **`audit.budget.max_tokens` did not bound a run's real token spend once
   provider prompt caching was involved.** `LLMResponse::totalTokens()`
   (`src/Audit/Domain/Port/LLMResponse.php`) returned only
