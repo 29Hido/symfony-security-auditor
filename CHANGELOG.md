@@ -439,6 +439,70 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org). See
   `message.text` with the override intact. `resultFor()` now scrubs the title
   the same way before stripping control characters.
 
+- **Auditing an untrusted repository with `--since` could execute an
+  attacker-controlled command.** `ProcessGitChangedFilesResolver` runs
+  `git diff` with the audited project as its working directory
+  (`src/Audit/Infrastructure/Diff/ProcessGitChangedFilesResolver.php`), so the
+  audited repo's own local `.git/config` — attacker data, not ours — is honored
+  by that `git` invocation. A `core.fsmonitor` entry there names an arbitrary
+  command git runs on any working-tree comparison, including the plain
+  `git diff --name-only HEAD` this resolver issues for uncommitted changes,
+  letting a malicious clone execute code as the auditor's own process the moment
+  `audit:run --since=<ref>` runs against it. `buildDefaultGitDiffProcess()` now
+  passes `-c core.fsmonitor=` alongside the existing `-c core.quotepath=off`,
+  neutralizing the hook the same way.
+
+- **The `core.fsmonitor` fix above still left a second, equally exploitable
+  command-execution path through the audited repo's own git config.** A
+  `.gitattributes` `filter=<name>` assignment plus a matching
+  `filter.<name>.clean` command in the same untrusted `.git/config` reaches an
+  arbitrary command too — git runs the clean filter to normalize a working-tree
+  file before comparing it against the index, which the plain
+  `git diff --name-only HEAD` this resolver used for uncommitted changes
+  triggers for any file whose stat info looks changed. Neither
+  `-c core.fsmonitor=` nor `-c core.attributesFile=` block it, since the driver
+  name is attacker-chosen and the repo's own `.gitattributes` is always honored
+  regardless of that setting. `ProcessGitChangedFilesResolver::changedSince()`
+  (`src/Audit/Infrastructure/Diff/ProcessGitChangedFilesResolver.php`) now gets
+  the same "uncommitted changes" information from `git diff-index --cached HEAD`
+  (index vs tree) plus `git diff-files` (working tree vs index) instead of
+  `git diff HEAD` — both plumbing commands answer the same "did this file
+  change" question without ever invoking a content filter.
+
+- **The MCP `audit` tool resolved advisories, SARIF imports, and triage cache
+  entries against the bundle's own directory instead of the audited project.**
+  `AuditCommand` sets `AuditedProjectPathHolder` from the resolved CLI argument
+  before running (`src/Command/AuditCommand.php`), but `AuditTool::audit()`
+  (`src/Command/Mcp/AuditTool.php`) never did the equivalent for its own `path`
+  argument, so `ComposerAuditAdvisoryDatabase`, `SarifImportingPreScanner` and
+  `FilesystemTriageMemoryStore` — all of which read
+  `AuditedProjectPathHolder::path()` — fell back to `kernel.project_dir`
+  whenever the tool was invoked over MCP rather than `audit:run`. `AuditTool`
+  now sets the holder from its own `path` argument before delegating to
+  `RunAuditUseCase`, matching the command's behavior.
+
+- **That MCP path fix above copied `AuditCommand`'s call but not its
+  normalization.** `AuditCommandInput::resolvedProjectPath()`
+  (`src/Command/AuditCommandInput.php`) canonicalizes an absolute CLI argument
+  via `Path::canonicalize()` before anything downstream sees it, but
+  `AuditTool::audit()` passed the MCP tool's raw `path` argument straight
+  through — a relative path silently reached `Process`'s `$cwd` in
+  `SymfonyProcessComposerAuditRunner`, a `..`-bearing absolute path hashed to a
+  different triage-cache key than its canonical form, and
+  `SarifImportingPreScanner::normalizeUri()` silently failed to strip a
+  non-canonical prefix from imported SARIF artifact URIs. `AuditTool` now
+  rejects a non-absolute `path` with the new `InvalidProjectPathException`
+  (`src/Command/Exception/InvalidProjectPathException.php`) and canonicalizes an
+  absolute one before setting the holder, matching the CLI path exactly.
+
+- **A public marker string let any PR commenter hijack the action's own report
+  comment.** `comment-pr` (`action.yml`) finds the comment to edit in place by
+  matching a body marker that is visible in this repository's own source, with
+  no check on who posted it — so a PR author (or anyone else able to comment)
+  could post that marker first and have the job's `pull-requests: write` token
+  edit their comment on every subsequent rerun instead of posting its own. The
+  `jq` selector now also requires `.user.login == "github-actions[bot]"`.
+
 - **`audit.budget.max_tokens` did not bound a run's real token spend once
   provider prompt caching was involved.** `LLMResponse::totalTokens()`
   (`src/Audit/Domain/Port/LLMResponse.php`) returned only
