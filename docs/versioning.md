@@ -169,7 +169,7 @@ deprecated by the other.
   renaming or removing one is a `MAJOR`. The Marketplace `name`
   (`Symfony Security Auditor`) is also stable.
 - **Version pinning.** Consumers pin the action to an exact release tag —
-  `uses: vinceamstoutz/symfony-security-auditor@1.19.0` — matching the tag
+  `uses: vinceamstoutz/symfony-security-auditor@1.19.1` — matching the tag
   format used on Packagist. Bump the pin when upgrading. There is intentionally
   no floating `v1` tag: the `uses:` ref and the config-schema URL both point at
   the same release tag, so a given pin always resolves to one immutable release.
@@ -399,7 +399,33 @@ current `<N>.x`, anything breaking goes to the next `MAJOR`'s. Fixes are merged
 forward — `1.x` into `2.x` — so they are never applied twice and the next
 `MAJOR` never regresses behind the current line.
 
-At any release, the `<N>.x` branch is merged into `main` and tagged there.
+At any release, the `<N>.x` branch is merged into `main` and tagged there: open
+a `chore: release X.Y.Z` pull request from `<N>.x` — promoting the changelog and
+bumping every version pin via `bin/castor release:bump X.Y.Z` — against `main`.
+**Merge it with a regular merge commit — the one exception to
+["always squash-merge"](../CLAUDE.md#pull-requests).** `main` is meant to end up
+with `<N>.x`'s exact commit SHAs, matching every release before this one (e.g.
+1.18.0's PR #226); a regular merge is the only method that preserves them.
+Squash-merging collapses `<N>.x`'s commits into one new SHA absent from `<N>.x`,
+so the two branches permanently diverge in commit identity and need a
+cherry-pick-back reconciliation after every release. Rebase-merging is worse: it
+replays every commit `<N>.x` has accumulated since it last diverged from `main`
+with a fresh SHA apiece, which (a) causes that same divergence and (b) re-runs
+CI's `Commit Lint` job — which lints the full commit range on every push to
+`main` — over that entire replayed history, so one old commit whose scope has
+since fallen out of `commitlint.config.mjs`'s `scope-enum` turns the release
+push red for a commit nobody can amend. A regular merge lands `main` exactly on
+`<N>.x`'s tip (plus one merge commit), so `<N>.x` needs no cherry-pick afterward
+— it already has every commit, unchanged. Once the release commit lands, the
+[Auto Release](../.github/workflows/auto-release.yaml) workflow tags it `X.Y.Z`,
+generates a `What's Changed` summary from the merged pull requests since the
+previous tag, and drafts the GitHub Release — publish it when ready, which
+triggers the binary-build workflow. Its `push` trigger only fires going forward,
+so it cannot cover a release commit that already landed on `main` before the
+workflow existed (or before the workflow's `if:` could match it); for that case,
+dispatch it manually with the `version` `workflow_dispatch` input — it always
+tags and diffs against `main`'s history regardless of which ref the dispatch
+itself runs from.
 
 Because `main` is the default branch, a pull request opens against it by default
 even though almost nothing should land there directly. **Retarget the base** to
