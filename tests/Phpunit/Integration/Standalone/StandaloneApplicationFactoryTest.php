@@ -123,6 +123,16 @@ final class StandaloneApplicationFactoryTest extends TestCase
         self::assertTrue($standaloneApplication->has('doctor'), 'an environment with no HOME and no XDG variables leaves the refreshed-catalog location unresolvable, which must not stop the application from building');
     }
 
+    public function test_it_exposes_one_pending_binary_swap_for_the_entry_point_to_commit(): void
+    {
+        $standaloneApplicationFactory = StandaloneApplicationFactory::fromEnvironment([
+            'XDG_CONFIG_HOME' => sys_get_temp_dir().'/ssa-absent-'.bin2hex(random_bytes(6)),
+            'XDG_CACHE_HOME' => $this->cacheHome,
+        ]);
+
+        self::assertSame($standaloneApplicationFactory->pendingBinarySwap(), $standaloneApplicationFactory->pendingBinarySwap());
+    }
+
     public function test_it_registers_the_doctor_command(): void
     {
         $standaloneApplication = StandaloneApplicationFactory::fromEnvironment([

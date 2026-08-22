@@ -45,6 +45,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\Filesys
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\GitHubBinaryAssetResolver;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\ModelsDevCatalogRefresher;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\NullPricingCatalogRefresher;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\PendingBinarySwap;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\PricingCatalogRefresherInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\ProcessReleaseClient;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\RunningBinaryLocator;
@@ -81,7 +82,17 @@ final readonly class StandaloneApplicationFactory
         private string $runningBinaryPath = '',
         private string $pathEnvironment = '',
         private ?UpdateAvailabilityConsoleListener $updateAvailabilityConsoleListener = null,
+        private PendingBinarySwap $pendingBinarySwap = new PendingBinarySwap(),
     ) {}
+
+    /**
+     * The standalone entry point drains this on the way out, once the console
+     * application can no longer autoload from the archive being replaced.
+     */
+    public function pendingBinarySwap(): PendingBinarySwap
+    {
+        return $this->pendingBinarySwap;
+    }
 
     /**
      * @param array<string, string> $environment
@@ -91,6 +102,7 @@ final readonly class StandaloneApplicationFactory
         $xdgConfigPathResolver = self::resolverFromEnvironment($environment);
         $resolvedBinaryPath = $runningBinaryPath ?? '';
         $pathEnvironment = $environment['PATH'] ?? '';
+        $pendingBinarySwap = new PendingBinarySwap();
 
         return new self(
             new StandaloneConfigLoader(
@@ -107,7 +119,9 @@ final readonly class StandaloneApplicationFactory
                 $resolvedBinaryPath,
                 $pathEnvironment,
                 self::updateChecksDisabled($environment),
+                $pendingBinarySwap,
             ),
+            pendingBinarySwap: $pendingBinarySwap,
         );
     }
 
@@ -183,18 +197,20 @@ final readonly class StandaloneApplicationFactory
     private function selfUpdateCommand(): SelfUpdateCommand
     {
         return new SelfUpdateCommand(
-            self::selfUpdater($this->runningBinaryPath, $this->pathEnvironment, self::pricingCatalogRefresher($this->xdgConfigPathResolver)),
+            self::selfUpdater($this->runningBinaryPath, $this->pathEnvironment, $this->pendingBinarySwap, self::pricingCatalogRefresher($this->xdgConfigPathResolver)),
             (new ReportPackage())->version(),
             self::updateCheckStore($this->xdgConfigPathResolver),
+            new NativeClock(),
         );
     }
 
-    private static function selfUpdater(string $runningBinaryPath, string $pathEnvironment, PricingCatalogRefresherInterface $pricingCatalogRefresher = new NullPricingCatalogRefresher()): SelfUpdater
+    private static function selfUpdater(string $runningBinaryPath, string $pathEnvironment, PendingBinarySwap $pendingBinarySwap, PricingCatalogRefresherInterface $pricingCatalogRefresher = new NullPricingCatalogRefresher()): SelfUpdater
     {
         return new SelfUpdater(
             new ProcessReleaseClient(ProcessReleaseClient::defaultProcessBuilder()),
             new GitHubBinaryAssetResolver(\PHP_OS_FAMILY, php_uname('m')),
             new RunningBinaryLocator('/proc/self/exe', $runningBinaryPath, pathEnvironment: $pathEnvironment),
+            $pendingBinarySwap,
             pricingCatalogRefresher: $pricingCatalogRefresher,
         );
     }
@@ -253,10 +269,11 @@ final readonly class StandaloneApplicationFactory
         string $runningBinaryPath,
         string $pathEnvironment,
         bool $disabled,
+        PendingBinarySwap $pendingBinarySwap,
     ): UpdateAvailabilityConsoleListener {
         return new UpdateAvailabilityConsoleListener(
             new ThrottledUpdateAvailabilityNotifier(
-                self::selfUpdater($runningBinaryPath, $pathEnvironment),
+                self::selfUpdater($runningBinaryPath, $pathEnvironment, $pendingBinarySwap),
                 self::updateCheckStore($xdgConfigPathResolver),
                 new NativeClock(),
             ),
