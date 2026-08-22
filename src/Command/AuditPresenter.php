@@ -159,6 +159,24 @@ final readonly class AuditPresenter implements AuditPresenterInterface
         ));
     }
 
+    #[Override]
+    public function synthesisCostWarnings(SymfonyStyle $symfonyStyle, bool $pocSynthesisEnabled, bool $fixSynthesisEnabled): void
+    {
+        if ($pocSynthesisEnabled && $fixSynthesisEnabled) {
+            $symfonyStyle->getErrorStyle()->warning('PoC synthesis (audit.poc_synthesis.enabled) and fix synthesis (audit.fix_synthesis.enabled) are both enabled. Their LLM calls are not included in this cost estimate, so a real run will cost more than the figure shown.');
+
+            return;
+        }
+
+        if ($pocSynthesisEnabled) {
+            $symfonyStyle->getErrorStyle()->warning('PoC synthesis is enabled (audit.poc_synthesis.enabled). Its LLM calls are not included in this cost estimate, so a real run will cost more than the figure shown.');
+        }
+
+        if ($fixSynthesisEnabled) {
+            $symfonyStyle->getErrorStyle()->warning('Fix synthesis is enabled (audit.fix_synthesis.enabled). Its LLM calls are not included in this cost estimate, so a real run will cost more than the figure shown.');
+        }
+    }
+
     /** @return array<string, string> */
     private function unsupportedModels(AuditCost $auditCost): array
     {
