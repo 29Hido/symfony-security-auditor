@@ -12,6 +12,36 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org). See
 
 ### Added
 
+- **`self-update` now refreshes the bundled pricing catalog after replacing the
+  binary**, so a long-lived install picks up newly-added models and price
+  changes without waiting for the next binary release. `SelfUpdater::run()`
+  calls a new `PricingCatalogRefresherInterface` port after `replaceBinary()`
+  succeeds; `ModelsDevCatalogRefresher` (`src/Audit/Infrastructure/SelfUpdate/`)
+  downloads `models-dev.json` into the XDG cache directory, and
+  `ModelsDevPricingProvider` now reads from that same cache location by default
+  (`config/services.php` wires `%kernel.cache_dir%/models-dev.json`) instead of
+  only the version bundled at build time. The download lands in a temp file and
+  is only moved into place once it has been confirmed both to decode as a JSON
+  object and to carry at least one priced model, so neither a truncated transfer
+  nor an unrelated document served in its place can leave a corrupt catalog
+  behind — the previous good file (or the one frozen into the binary) stays put.
+  The catalog URL tracks upstream `main` deliberately: pinning it to a tag would
+  freeze the catalog at exactly the staleness a new binary release already
+  fixes, so the shape check above is what guards the install. The refresh never
+  throws — a failed download, an unwritable cache directory or an unrecognized
+  payload returns `PricingCatalogRefreshOutcome::Failed`, and `self-update` now
+  says so instead of failing silently, warning that cost figures keep using the
+  catalog already in place — the last successful refresh if there was one,
+  otherwise the one frozen into the binary at build time — and that re-running
+  `self-update` retries it, which it now can: the refresh no longer rides only
+  on a binary replacement, so a binary already on the latest version still
+  refreshes a catalog that has drifted since its build. A `--check` probe never
+  does, so the background update notifier stays side-effect-free. It is skipped
+  entirely when `privacy.offline_only` is set or the XDG config path can't be
+  resolved (`StandaloneApplicationFactory::pricingCatalogRefresher()`), and the
+  `privacy.offline_only` lookup now goes through
+  `StandaloneConfig::offlineOnlyIn()` so the key path lives in one place rather
+  than being re-read by hand.
 - **`doctor` and `--version` now surface which `symfony/models-dev` pricing
   snapshot is bundled.** A standalone install's cost figures (`--dry-run`, the
   report's `Cost` line) come from whatever `symfony/models-dev` catalog was
@@ -51,6 +81,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org). See
   version onto a file that does not have it.
   `ModelsDevPricingProvider::packagedCatalogPath()` (the former private
   `defaultCatalogPath()`, now `public`) is what the check compares against.
+
 - **A clean run (zero findings) no longer leaves the reviewer step looking like
   it silently disappeared.** `ConsoleProgressReporter::onReviewStarted()` (and
   its `PlainProgressReporter` counterpart) only ever fired when the attacker
@@ -75,6 +106,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org). See
   recognise falls back to a bare "review skipped" rather than borrowing the "no
   new findings" wording: a fourth reason added later would otherwise be
   announced as the wrong cause, which is worse than naming none.
+
 - **The console, Markdown, and HTML reports now show the audit's real cost, not
   just token counts.** `RunAuditUseCase::buildCost()` already assembled an
   `AuditCost` from the LLM provider's own per-call token usage, but
@@ -117,6 +149,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org). See
   model whose whole run arrived from the prompt cache and priced to zero is
   still reported as a pricing gap instead of passing as free. Both keys are
   optional in the accepted shape, keeping `withUsageByModel()` callers valid.
+
 - **The CLI header now carries the project's identity, and renders the same way
   everywhere.** `AuditPresenter::header()` (`src/Command/AuditPresenter.php`)
   printed `$symfonyStyle->title('Symfony LLM Security Auditor')` — a plain

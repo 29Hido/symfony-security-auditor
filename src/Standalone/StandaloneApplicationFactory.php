@@ -22,6 +22,8 @@ use Symfony\Component\Console\ConsoleEvents;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\EventDispatcher\EventDispatcher;
 use Symfony\Component\Filesystem\Filesystem;
+use Symfony\Component\Yaml\Exception\ParseException;
+use Symfony\Component\Yaml\Yaml;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Bridge\BridgeInstallerInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Bridge\ComposerBridgeInstaller;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\MalformedProjectConfigException;
@@ -31,6 +33,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\N
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\ProjectConfigPlatformOverrideException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\ProjectConfigScanOverrideException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\UnresolvableConfigPathException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\StandaloneConfig;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\StandaloneConfigFactory;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\StandaloneConfigLoader;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\StandalonePlatformConfigResolver;
@@ -40,6 +43,9 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Pricing\ModelsDevP
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Report\ReportPackage;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\FilesystemUpdateCheckStore;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\GitHubBinaryAssetResolver;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\ModelsDevCatalogRefresher;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\NullPricingCatalogRefresher;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\PricingCatalogRefresherInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\ProcessReleaseClient;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\RunningBinaryLocator;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\SelfUpdater;
@@ -177,19 +183,69 @@ final readonly class StandaloneApplicationFactory
     private function selfUpdateCommand(): SelfUpdateCommand
     {
         return new SelfUpdateCommand(
-            self::selfUpdater($this->runningBinaryPath, $this->pathEnvironment),
+            self::selfUpdater($this->runningBinaryPath, $this->pathEnvironment, self::pricingCatalogRefresher($this->xdgConfigPathResolver)),
             (new ReportPackage())->version(),
             self::updateCheckStore($this->xdgConfigPathResolver),
         );
     }
 
-    private static function selfUpdater(string $runningBinaryPath, string $pathEnvironment): SelfUpdater
+    private static function selfUpdater(string $runningBinaryPath, string $pathEnvironment, PricingCatalogRefresherInterface $pricingCatalogRefresher = new NullPricingCatalogRefresher()): SelfUpdater
     {
         return new SelfUpdater(
             new ProcessReleaseClient(ProcessReleaseClient::defaultProcessBuilder()),
             new GitHubBinaryAssetResolver(\PHP_OS_FAMILY, php_uname('m')),
             new RunningBinaryLocator('/proc/self/exe', $runningBinaryPath, pathEnvironment: $pathEnvironment),
+            pricingCatalogRefresher: $pricingCatalogRefresher,
         );
+    }
+
+    /**
+     * `self-update` must keep working before "init" has ever run, so this
+     * never routes through `StandaloneConfigLoader::load()` — it would throw
+     * `MissingPlatformException` on a fresh install. A config file that is
+     * present but broken (an unresolvable home directory, malformed YAML)
+     * fails closed to skipping the refresh, same as `privacy.offline_only`
+     * being enabled on purpose. A fresh install with no config file yet has
+     * nothing to fail closed on, so it defaults to online.
+     */
+    public static function pricingCatalogRefresher(XdgConfigPathResolver $xdgConfigPathResolver): PricingCatalogRefresherInterface
+    {
+        if (self::offlineOnly($xdgConfigPathResolver)) {
+            return new NullPricingCatalogRefresher();
+        }
+
+        try {
+            $cacheDir = $xdgConfigPathResolver->cacheDir();
+        } catch (UnresolvableConfigPathException) {
+            return new NullPricingCatalogRefresher();
+        }
+
+        return new ModelsDevCatalogRefresher(
+            new ProcessReleaseClient(ProcessReleaseClient::defaultProcessBuilder()),
+            $cacheDir,
+            new NullLogger(),
+        );
+    }
+
+    private static function offlineOnly(XdgConfigPathResolver $xdgConfigPathResolver): bool
+    {
+        try {
+            $configFile = $xdgConfigPathResolver->configFile();
+        } catch (UnresolvableConfigPathException) {
+            return true;
+        }
+
+        if (!is_file($configFile)) {
+            return false;
+        }
+
+        try {
+            $parsed = Yaml::parseFile($configFile);
+        } catch (ParseException) {
+            return true;
+        }
+
+        return \is_array($parsed) && StandaloneConfig::offlineOnlyIn($parsed);
     }
 
     private static function updateAvailabilityConsoleListener(
