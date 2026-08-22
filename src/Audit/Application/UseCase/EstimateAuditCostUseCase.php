@@ -14,6 +14,7 @@ declare(strict_types=1);
 namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\UseCase;
 
 use Psr\Log\LoggerInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\AttackerAgent;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\Chunking\FileChunker;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Budget\CostCalculator;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Scan\ScanPathFilter;
@@ -39,7 +40,10 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\TokenEstimatorInterfa
  * Estimation strategy: every scanned file contributes its content to a
  * synthetic "attacker prompt" (input). The attacker system prompt's skill
  * blocks are sent once per chunk — chunked the same way `FileChunker` chunks
- * a real run — and added on top. Output tokens are projected at
+ * a real run — and added on top. When `audit.tools_enabled` is on, the
+ * attacker may take several tool-call rounds per chunk, each resending the
+ * growing conversation plus the tool schemas — `toolRoundTripRatio` inflates
+ * the per-round input to account for that. Output tokens are projected at
  * `outputRatio * input` because audit prompts are heavily input-skewed.
  * Multiplied by `max_iterations` to account for the attacker/reviewer loop.
  *
@@ -63,6 +67,23 @@ final readonly class EstimateAuditCostUseCase
      */
     public const float DEFAULT_REVIEWER_INPUT_RATIO = 0.20;
 
+    /**
+     * Conservative estimate of the extra attacker input consumed by
+     * tool-call round-trips (the re-sent conversation plus tool schemas on
+     * every round) when `audit.tools_enabled` is on. Calibrated against
+     * reference audits at ~50% on top of the base per-round input, with
+     * `audit.max_tool_iterations` left at {@see CALIBRATION_MAX_TOOL_ITERATIONS}.
+     */
+    public const float DEFAULT_TOOL_ROUND_TRIP_RATIO = 0.50;
+
+    /**
+     * The `audit.max_tool_iterations` bound the ratio above was measured
+     * against. It moves only when the calibration is redone, which is why it
+     * is not simply `AttackerAgent::DEFAULT_MAX_TOOL_ITERATIONS` — changing
+     * that default must change the estimate, not silently re-anchor it.
+     */
+    public const int CALIBRATION_MAX_TOOL_ITERATIONS = 8;
+
     public function __construct(
         private ProjectFileScannerInterface $projectFileScanner,
         private TokenEstimatorInterface $tokenEstimator,
@@ -77,6 +98,9 @@ final readonly class EstimateAuditCostUseCase
         private float $reviewerInputRatio = self::DEFAULT_REVIEWER_INPUT_RATIO,
         private ?GitChangedFilesResolverInterface $gitChangedFilesResolver = null,
         private bool $emitAllSkills = true,
+        private bool $toolsEnabled = true,
+        private float $toolRoundTripRatio = self::DEFAULT_TOOL_ROUND_TRIP_RATIO,
+        private int $maxToolIterations = AttackerAgent::DEFAULT_MAX_TOOL_ITERATIONS,
     ) {}
 
     /**
@@ -110,6 +134,10 @@ final readonly class EstimateAuditCostUseCase
         }
 
         $attackerPerRoundInput = $fileContentPerRoundInput + $this->skillPromptTokensAcrossChunks($files);
+
+        if ($this->toolsEnabled) {
+            $attackerPerRoundInput = (int) ceil($attackerPerRoundInput * $this->toolRoundTripMultiplier());
+        }
 
         $attackerInputTokens = $attackerPerRoundInput * $this->maxIterations;
         $attackerOutputTokens = (int) ceil($attackerInputTokens * $this->outputRatio);
@@ -151,6 +179,18 @@ final readonly class EstimateAuditCostUseCase
         ]);
 
         return AuditReport::fromContext($auditContext, $auditCost);
+    }
+
+    /**
+     * `audit.max_tool_iterations` caps the tool-call rounds a chunk may take,
+     * so it caps the conversation those rounds re-send. Scaling the calibrated
+     * ratio by the configured bound keeps the estimate honest for a user who
+     * lowers it to cut cost, instead of charging every run the calibrated
+     * maximum.
+     */
+    private function toolRoundTripMultiplier(): float
+    {
+        return 1.0 + $this->toolRoundTripRatio * ($this->maxToolIterations / self::CALIBRATION_MAX_TOOL_ITERATIONS);
     }
 
     /**

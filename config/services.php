@@ -659,6 +659,9 @@ return static function (ContainerConfigurator $containerConfigurator): void {
             EstimateAuditCostUseCase::DEFAULT_REVIEWER_INPUT_RATIO,
             service(GitChangedFilesResolverInterface::class),
             param('symfony_security_auditor.audit.stable_system_prompt'),
+            param('symfony_security_auditor.audit.tools_enabled'),
+            EstimateAuditCostUseCase::DEFAULT_TOOL_ROUND_TRIP_RATIO,
+            param('symfony_security_auditor.audit.max_tool_iterations'),
         ]);
 
     $defaultsConfigurator->set(ListScannedFilesUseCase::class)

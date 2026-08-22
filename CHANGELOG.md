@@ -27,6 +27,19 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org). See
   `stable_system_prompt` is `false`: each chunk then only pulls in the skills
   matching its own files, the same filtering
   `AttackerPromptBuilder::skillsForFiles()` applies on a real run.
+- **`--dry-run` now also counts tool round-trip overhead.** With
+  `audit.tools_enabled` (default `true`), the attacker can take several
+  tool-call rounds per chunk, each resending the growing conversation plus the
+  tool schemas — none of which the estimate previously modeled. A new
+  `EstimateAuditCostUseCase::DEFAULT_TOOL_ROUND_TRIP_RATIO` (50%) inflates the
+  per-round attacker input whenever `tools_enabled` is on, before scaling by
+  `max_iterations`, following the same calibrated-ratio pattern as
+  `DEFAULT_OUTPUT_RATIO`. The ratio is scaled by `audit.max_tool_iterations`,
+  the option that actually bounds how many tool rounds a chunk may take, against
+  the `CALIBRATION_MAX_TOOL_ITERATIONS` bound the 50% was measured at: halving
+  the bound to 4 charges 25% instead of 50%, and raising it to 16 charges 100%.
+  Lowering `max_tool_iterations` to cut cost is now reflected in the estimate
+  rather than ignored by it.
 
   The reviewer estimate deliberately stays out of this. `reviewerInputRatio` is
   applied to the file-content sum alone, not to the attacker total, because the
