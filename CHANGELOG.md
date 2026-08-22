@@ -12,6 +12,30 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org). See
 
 ### Added
 
+- **A clean run (zero findings) no longer leaves the reviewer step looking like
+  it silently disappeared.** `ConsoleProgressReporter::onReviewStarted()` (and
+  its `PlainProgressReporter` counterpart) only ever fired when the attacker
+  recorded at least one finding, so a run with nothing to report jumped straight
+  from the last chunk to the final report with no acknowledgment that reviewing
+  had nothing to do. `AuditOrchestrator` now reports a new `review.skipped`
+  progress event (`src/Audit/Domain/Model/ProgressEvent.php`) from all three
+  places it can skip the reviewer pass — the attacker finding nothing, every
+  remaining finding already being baseline-accepted, and the mid-run abort
+  recovery path finding nothing left to review — which both progress reporters
+  render as a lightweight one-line acknowledgment. The earlier wording ("no
+  findings to review") read as though the whole audit came up empty even on
+  iteration 2+, after findings had already streamed past.
+
+  Each site carries its own `reason` in the event context, because only the
+  first of the three is actually "no new findings": the second means every
+  finding _was_ found and then baseline-accepted, and the third fires as a run
+  is aborting, where a reassuring line would print immediately before the
+  failure. The reporters render "every finding was baseline-accepted — review
+  skipped" and "nothing left to review after the abort" respectively. Each of
+  the three reasons is matched explicitly, and a reason the reporters do not
+  recognise falls back to a bare "review skipped" rather than borrowing the "no
+  new findings" wording: a fourth reason added later would otherwise be
+  announced as the wrong cause, which is worse than naming none.
 - **The console, Markdown, and HTML reports now show the audit's real cost, not
   just token counts.** `RunAuditUseCase::buildCost()` already assembled an
   `AuditCost` from the LLM provider's own per-call token usage, but
