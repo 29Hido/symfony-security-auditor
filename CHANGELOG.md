@@ -282,6 +282,33 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org). See
 
 ### Fixed
 
+- **`docs/architecture.md`'s command reference no longer contradicts
+  `docs/configuration.md`.** Its exit-code summary read "`0`
+  (SAFE/LOW/MEDIUM/HIGH), `1` (CRITICAL risk or invalid path or unexpected
+  failure), `2` (budget exceeded)", which predates three behaviours the
+  canonical table in `docs/configuration.md` already documents: `audit.fail_on`
+  is configurable, so HIGH exits `1` whenever it is set below `critical`; a scan
+  that discovers no file at all exits `1`; a score below `--min-score` exits
+  `1`; and `2` also covers a run that never started because an unpriced model
+  makes `audit.budget.max_cost_usd` unenforceable. The same table listed three
+  `--format` values when `OutputFormat` has nine. Both rows are corrected and
+  the exit-code paragraph now points at the canonical table rather than
+  restating it.
+- **`scan.code_slicing`'s configuration reference no longer promises whole
+  method bodies.** The `info()` text — what
+  `config:dump-reference symfony_security_auditor` prints — said the slicer
+  keeps "the FULL body of methods that touch security-relevant tokens".
+  `RegexCodeSlicer` retains per line, not per method, which
+  `test_inert_body_lines_are_elided()` pins deliberately: on a textbook
+  vulnerable controller the source (`$name = $request->request->get('name')`)
+  and the sink (`$this->conn->executeStatement($sql)`) are both kept while the
+  `$sql` concatenation between them is elided, so the slice shows `$sql` used
+  but never assigned, and a reflected-XSS built the same way disappears
+  entirely. The text now states that retention is per line, that an inert line
+  inside a matched method is still elided, and that a file should go unsliced
+  when the taint flow between source and sink matters more than the tokens.
+  Behaviour is unchanged; only the description was wrong. `code_slicing` follows
+  the active profile when unset, so this is the documented default on `fast`.
 - **The pipeline line printed two characters a Windows console cannot show.**
   `AuditPresenter::header()` emitted
   `Pipeline: Ingestion → Mapping → Audit (Attacker ⚔ Reviewer)`. `→` (U+2192)
@@ -334,6 +361,23 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org). See
   `--check` had already shown the user the newer version. `SelfUpdateCommand`
   now records the version it observed, so the notice agrees from the next
   command onwards.
+
+### Security
+
+- **Secret scrubbing now redacts `Authorization: Basic` credentials and Slack
+  app-level tokens.** `RegexSecretScrubber::DEFAULT_PATTERNS` covered
+  `Authorization: Bearer` but not `Basic`, so a committed
+  `Authorization: Basic <base64>` — which decodes straight back to
+  `user:password` — was sent verbatim to the configured LLM provider on the
+  default `scan.secret_scrubbing.enabled` path. The same gap applied within a
+  provider already covered: `xox[abprs]-` tokens and `hooks.slack.com` webhook
+  URLs were redacted while Slack's `xapp-` app-level tokens were not. Both are
+  now matched, and the Basic pattern keeps the header name and scheme
+  (`Authorization: Basic ***REDACTED:basic_authorization***`) so the audit can
+  still see that the request authenticates and how. The pattern requires the
+  header or an assignment before the credential, so prose such as "use basic
+  authentication over TLS" is left alone. `SecretPatternLabel` gains
+  `BasicAuthorization`.
 
 ## [1.19.1] — 2026-08-13 — Lineage
 
