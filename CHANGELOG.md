@@ -10,6 +10,29 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org). See
 
 ## [Unreleased]
 
+### Added
+
+- **The CLI header now carries the project's identity, and renders the same way
+  everywhere.** `AuditPresenter::header()` (`src/Command/AuditPresenter.php`)
+  printed `$symfonyStyle->title('Symfony LLM Security Auditor')` — a plain
+  underlined line with no visual identity. It now prints `◉ >> SECURITY AUDITOR`
+  with the mark and `SECURITY` in the logo's pink (`#e71c55`) and `AUDITOR` in
+  its navy (`#5b6fd6`), over a `Symfony - multi-agent LLM audit` tagline whose
+  indent is derived from the lead string rather than hardcoded, so it always
+  starts under the wordmark.
+
+  Colour is the only thing that varies by terminal. A single `writeln()`
+  produces every state, because `OutputFormatter` strips the style tags when the
+  output is not decorated — so a CI log shows the identical layout rather than a
+  different header, instead of the previous `title()` fallback.
+
+  `◉` (U+25C9) is outside CP437, CP850 and CP1252, so a console left on a legacy
+  code page would substitute it. `AuditPresenter::scanMark()` drops the mark
+  unless `LC_ALL`, `LC_CTYPE` or `LANG` announces UTF-8, leaving the coloured
+  wordmark, which carries the identity on its own. A Windows console sets none
+  of those unless the shell is UTF-8 aware, so it lands on the ASCII wordmark.
+  Every other character in the header is ASCII.
+
 ### Changed
 
 - **`--show-scanned`'s generic `php` and `other` buckets no longer read as
@@ -46,6 +69,12 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org). See
 
 ### Fixed
 
+- **The pipeline line printed two characters a Windows console cannot show.**
+  `AuditPresenter::header()` emitted
+  `Pipeline: Ingestion → Mapping → Audit (Attacker ⚔ Reviewer)`. `→` (U+2192)
+  and `⚔` (U+2694) are both outside CP437/CP850/CP1252, and `⚔` is frequently
+  rendered double-width, which shifts every column after it. The line now reads
+  `Pipeline: Ingestion -> Mapping -> Audit (Attacker vs Reviewer)`.
 - **`self-update` could corrupt the installed binary and leave no readable error
   behind.** `SelfUpdater::assertChecksumMatches()`
   (`src/Audit/Infrastructure/SelfUpdate/SelfUpdater.php`) guarded a failed
