@@ -17,12 +17,16 @@ use Override;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\Chunking\ChunkingStrategy;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\Chunking\FileChunker;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Budget\CostCalculator;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\UseCase\EstimateAuditCostUseCase;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidAuditContextException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidAuditCostException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidProjectFileException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ProjectFile;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ProjectFileType;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\AttackerSkillPromptRendererInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\GitChangedFilesResolverInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\PricingProviderInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\ProjectFileScannerInterface;
@@ -510,6 +514,8 @@ final class EstimateAuditCostUseCaseTest extends TestCase
             $this->fixedEstimator(perRoundTokens: 99),
             new CostCalculator($this->zeroPricing()),
             new NullLogger(),
+            new FileChunker(),
+            $this->skillPromptRenderer(''),
             primaryModel: 'gpt-4o',
         );
 
@@ -519,10 +525,215 @@ final class EstimateAuditCostUseCaseTest extends TestCase
     }
 
     /**
+     * @throws InvalidProjectFileException
+     * @throws InvalidAuditContextException
+     * @throws InvalidAuditCostException
+     */
+    public function test_emit_all_skills_defaults_to_true(): void
+    {
+        $attackerSkillPromptRenderer = self::createMock(AttackerSkillPromptRendererInterface::class);
+        $attackerSkillPromptRenderer->expects(self::once())
+            ->method('render')
+            ->with(self::anything(), true)
+            ->willReturn('');
+
+        $estimateAuditCostUseCase = new EstimateAuditCostUseCase(
+            $this->fixedScanner([$this->makeProjectFile('a.php', 'aaa')]),
+            $this->fixedEstimator(perRoundTokens: 1),
+            new CostCalculator($this->zeroPricing()),
+            new NullLogger(),
+            new FileChunker(),
+            $attackerSkillPromptRenderer,
+            primaryModel: 'gpt-4o',
+        );
+
+        $estimateAuditCostUseCase->execute($this->tmpDir);
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     * @throws InvalidAuditContextException
+     * @throws InvalidAuditCostException
+     */
+    public function test_skill_prompt_overhead_is_added_once_per_chunk_before_scaling_by_iterations(): void
+    {
+        $skillPrompt = 'SKILLTEXT';
+        $fileContentTokens = mb_strlen('aaa') + mb_strlen('bbb');
+        $chunksWhenChunkedOnePerFile = 2;
+
+        $estimateAuditCostUseCase = $this->makeUseCase([
+            'files' => [
+                $this->makeProjectFile('a.php', 'aaa'),
+                $this->makeProjectFile('b.php', 'bbb'),
+            ],
+            'tokenEstimator' => $this->lengthEchoingEstimator(),
+            'fileChunker' => new FileChunker(ChunkingStrategy::Type, chunkSize: 1),
+            'attackerSkillPromptRenderer' => $this->skillPromptRenderer($skillPrompt),
+            'maxIterations' => 1,
+        ]);
+
+        $auditReport = $estimateAuditCostUseCase->execute($this->tmpDir);
+
+        self::assertSame(
+            $fileContentTokens + (mb_strlen($skillPrompt) * $chunksWhenChunkedOnePerFile),
+            $auditReport->cost()->byRole()['attacker']['input_tokens'],
+        );
+    }
+
+    /**
+     * The reviewer prompt carries no attacker skill blocks, so
+     * `reviewerInputRatio` applies to the file-content sum alone. Deriving it
+     * from the attacker total instead would bill the reviewer for an overhead
+     * it never sends.
+     *
+     * @throws InvalidProjectFileException
+     * @throws InvalidAuditContextException
+     * @throws InvalidAuditCostException
+     */
+    public function test_skill_prompt_overhead_never_reaches_the_reviewer_estimate(): void
+    {
+        $reviewerInputWithoutSkills = $this->reviewerInputTokensWithSkillPrompt('');
+        $reviewerInputWithSkills = $this->reviewerInputTokensWithSkillPrompt('SKILLTEXT');
+
+        self::assertSame($reviewerInputWithoutSkills, $reviewerInputWithSkills);
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     * @throws InvalidAuditContextException
+     * @throws InvalidAuditCostException
+     */
+    private function reviewerInputTokensWithSkillPrompt(string $skillPrompt): int
+    {
+        $estimateAuditCostUseCase = $this->makeUseCase([
+            'files' => [
+                $this->makeProjectFile('a.php', 'aaa'),
+                $this->makeProjectFile('b.php', 'bbb'),
+            ],
+            'tokenEstimator' => $this->lengthEchoingEstimator(),
+            'fileChunker' => new FileChunker(ChunkingStrategy::Type, chunkSize: 1),
+            'attackerSkillPromptRenderer' => $this->skillPromptRenderer($skillPrompt),
+            'maxIterations' => 1,
+        ]);
+
+        return $estimateAuditCostUseCase->execute($this->tmpDir)->cost()->byRole()['reviewer']['input_tokens'];
+    }
+
+    /**
+     * A real run renders a chunk's skill block from only that chunk's own
+     * file types (`AttackerPromptBuilder::skillsForFiles()`), not the whole
+     * project's type union. Two chunks with different types therefore get
+     * differently-sized skill text — a renderer stubbed to return the same
+     * text for every call would hide a regression that flattens this back
+     * into "render once, multiply by chunk count".
+     *
+     * @throws InvalidProjectFileException
+     * @throws InvalidAuditContextException
+     * @throws InvalidAuditCostException
+     */
+    public function test_skill_prompt_overhead_reflects_each_chunks_own_file_types(): void
+    {
+        $controllerChunkSkillPrompt = 'CONTROLLERSKILL';
+        $everyOtherChunkSkillPrompt = 'E';
+        $fileContentTokens = mb_strlen('aaa') + mb_strlen('bbb');
+
+        $attackerSkillPromptRenderer = self::createStub(AttackerSkillPromptRendererInterface::class);
+        $attackerSkillPromptRenderer->method('render')->willReturnCallback(
+            static fn (array $presentTypes): string => [ProjectFileType::CONTROLLER] === $presentTypes ? $controllerChunkSkillPrompt : $everyOtherChunkSkillPrompt,
+        );
+
+        $estimateAuditCostUseCase = $this->makeUseCase([
+            'files' => [
+                $this->makeProjectFile('src/Controller/FooController.php', 'aaa'),
+                $this->makeProjectFile('src/Entity/Bar.php', 'bbb'),
+            ],
+            'tokenEstimator' => $this->lengthEchoingEstimator(),
+            'fileChunker' => new FileChunker(ChunkingStrategy::Type, chunkSize: 1),
+            'attackerSkillPromptRenderer' => $attackerSkillPromptRenderer,
+            'maxIterations' => 1,
+        ]);
+
+        $auditReport = $estimateAuditCostUseCase->execute($this->tmpDir);
+
+        self::assertSame(
+            $fileContentTokens + mb_strlen($controllerChunkSkillPrompt) + mb_strlen($everyOtherChunkSkillPrompt),
+            $auditReport->cost()->byRole()['attacker']['input_tokens'],
+        );
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     * @throws InvalidAuditContextException
+     * @throws InvalidAuditCostException
+     */
+    public function test_skill_prompt_overhead_is_skipped_when_the_renderer_has_no_relevant_skills(): void
+    {
+        $tokensChargedForAnyTextIncludingEmpty = 50;
+
+        $estimateAuditCostUseCase = $this->makeUseCase([
+            'files' => [$this->makeProjectFile('a.php', 'aaa')],
+            'tokenEstimator' => $this->fixedEstimator(perRoundTokens: $tokensChargedForAnyTextIncludingEmpty),
+            'attackerSkillPromptRenderer' => $this->skillPromptRenderer(''),
+            'maxIterations' => 1,
+        ]);
+
+        $auditReport = $estimateAuditCostUseCase->execute($this->tmpDir);
+
+        self::assertSame($tokensChargedForAnyTextIncludingEmpty, $auditReport->cost()->byRole()['attacker']['input_tokens']);
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     * @throws InvalidAuditContextException
+     * @throws InvalidAuditCostException
+     */
+    public function test_skill_prompt_renderer_receives_the_files_present_types_and_the_emit_all_flag(): void
+    {
+        $attackerSkillPromptRenderer = self::createMock(AttackerSkillPromptRendererInterface::class);
+        $attackerSkillPromptRenderer->expects(self::once())
+            ->method('render')
+            ->with(
+                self::callback(static fn (array $presentTypes): bool => [ProjectFileType::CONTROLLER] === $presentTypes),
+                false,
+            )
+            ->willReturn('');
+
+        $estimateAuditCostUseCase = $this->makeUseCase([
+            'files' => [$this->makeProjectFile('src/Controller/UserController.php', 'aaa')],
+            'tokenEstimator' => $this->fixedEstimator(perRoundTokens: 1),
+            'attackerSkillPromptRenderer' => $attackerSkillPromptRenderer,
+            'emitAllSkills' => false,
+        ]);
+
+        $estimateAuditCostUseCase->execute($this->tmpDir);
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     * @throws InvalidAuditContextException
+     * @throws InvalidAuditCostException
+     */
+    public function test_no_files_means_no_chunks_and_no_skill_prompt_overhead(): void
+    {
+        $estimateAuditCostUseCase = $this->makeUseCase([
+            'files' => [],
+            'tokenEstimator' => $this->fixedEstimator(perRoundTokens: 50),
+            'attackerSkillPromptRenderer' => $this->skillPromptRenderer('SKILLTEXT'),
+            'maxIterations' => 1,
+        ]);
+
+        $auditReport = $estimateAuditCostUseCase->execute($this->tmpDir);
+
+        self::assertSame(0, $auditReport->cost()->byRole()['attacker']['input_tokens']);
+    }
+
+    /**
      * @param array{
      *     files?: list<ProjectFile>,
      *     tokenEstimator?: TokenEstimatorInterface,
      *     logger?: LoggerInterface,
+     *     fileChunker?: FileChunker,
+     *     attackerSkillPromptRenderer?: AttackerSkillPromptRendererInterface,
      *     primaryModel?: string,
      *     maxIterations?: int,
      *     outputRatio?: float,
@@ -530,6 +741,7 @@ final class EstimateAuditCostUseCaseTest extends TestCase
      *     reviewerInputRatio?: float,
      *     pricingProvider?: PricingProviderInterface,
      *     gitChangedFilesResolver?: GitChangedFilesResolverInterface,
+     *     emitAllSkills?: bool,
      * } $overrides
      */
     private function makeUseCase(array $overrides = []): EstimateAuditCostUseCase
@@ -537,6 +749,8 @@ final class EstimateAuditCostUseCaseTest extends TestCase
         $files = $overrides['files'] ?? [];
         $tokenEstimator = $overrides['tokenEstimator'] ?? $this->fixedEstimator(perRoundTokens: 0);
         $logger = $overrides['logger'] ?? new NullLogger();
+        $fileChunker = $overrides['fileChunker'] ?? new FileChunker();
+        $attackerSkillPromptRenderer = $overrides['attackerSkillPromptRenderer'] ?? $this->skillPromptRenderer('');
         $primaryModel = $overrides['primaryModel'] ?? 'gpt-4o';
         $maxIterations = $overrides['maxIterations'] ?? 3;
         $outputRatio = $overrides['outputRatio'] ?? EstimateAuditCostUseCase::DEFAULT_OUTPUT_RATIO;
@@ -544,19 +758,32 @@ final class EstimateAuditCostUseCaseTest extends TestCase
         $reviewerInputRatio = $overrides['reviewerInputRatio'] ?? EstimateAuditCostUseCase::DEFAULT_REVIEWER_INPUT_RATIO;
         $pricingProvider = $overrides['pricingProvider'] ?? $this->zeroPricing();
         $gitChangedFilesResolver = $overrides['gitChangedFilesResolver'] ?? null;
+        $emitAllSkills = $overrides['emitAllSkills'] ?? true;
 
         return new EstimateAuditCostUseCase(
             $this->fixedScanner($files),
             $tokenEstimator,
             new CostCalculator($pricingProvider),
             $logger,
+            $fileChunker,
+            $attackerSkillPromptRenderer,
             $primaryModel,
             $maxIterations,
             $outputRatio,
             $reviewerModel,
             $reviewerInputRatio,
             $gitChangedFilesResolver,
+            $emitAllSkills,
         );
+    }
+
+    /** A renderer stub returning the same skill-prompt text regardless of the file types or emitAll flag it receives. */
+    private function skillPromptRenderer(string $skillPrompt): AttackerSkillPromptRendererInterface
+    {
+        $attackerSkillPromptRenderer = self::createStub(AttackerSkillPromptRendererInterface::class);
+        $attackerSkillPromptRenderer->method('render')->willReturn($skillPrompt);
+
+        return $attackerSkillPromptRenderer;
     }
 
     /**

@@ -12,6 +12,29 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org). See
 
 ### Added
 
+- **`--dry-run` now counts the attacker's skill-prompt overhead**, closing a gap
+  where the estimate undercounted real spend by a fixed amount repeated on every
+  chunk and every iteration. `audit.stable_system_prompt` (default `true`) makes
+  the attacker send every built-in skill block — currently 25 of them, ~66KB of
+  prompt — on every chunk regardless of relevance, and none of that reached the
+  estimate. `EstimateAuditCostUseCase::execute()` now chunks the scanned files
+  the same way a real run does (via `FileChunker`) and, for each chunk, renders
+  its own skill prompt through the new `AttackerSkillPromptRendererInterface`
+  port (implemented by `AttackerSkillRegistry`) and estimates its tokens, adding
+  the sum to the attacker's per-round input before scaling by `max_iterations`.
+  Rendering per chunk — rather than once from the whole project's file-type
+  union and multiplying by the chunk count — keeps the estimate accurate when
+  `stable_system_prompt` is `false`: each chunk then only pulls in the skills
+  matching its own files, the same filtering
+  `AttackerPromptBuilder::skillsForFiles()` applies on a real run.
+
+  The reviewer estimate deliberately stays out of this. `reviewerInputRatio` is
+  applied to the file-content sum alone, not to the attacker total, because the
+  reviewer prompt carries no skill blocks — `ReviewerPromptBuilder` and
+  everything under `Infrastructure/Prompt/Reviewer/` reference none. Deriving it
+  from the attacker total instead would bill the reviewer for an overhead it
+  never sends.
+
 - **`self-update` now refreshes the bundled pricing catalog after replacing the
   binary**, so a long-lived install picks up newly-added models and price
   changes without waiting for the next binary release. `SelfUpdater::run()`
