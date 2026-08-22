@@ -12,6 +12,17 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org). See
 
 ### Changed
 
+- **`--show-scanned`'s generic `php` and `other` buckets no longer read as
+  "every PHP file"/"every other file."** `AuditPresenter::scannedFiles()`
+  (`src/Command/AuditPresenter.php`) printed the fallback `ProjectFileType::PHP`
+  and `::OTHER` buckets — the catch-all for files matching no specific archetype
+  — as plain `php (N)`/`other (N)` siblings of
+  `entity`/`voter`/`event_subscriber`/etc., with nothing marking them as the
+  leftover buckets they are. Both are now labeled `php · uncategorized`/
+  `other · uncategorized` and always render last, after every specific
+  archetype. Presentation only — the underlying `ProjectFileType` backed values
+  (`'php'`/`'other'`, used by `included_types`/`excluded_types` config) are
+  unchanged.
 - **`--show-scanned` and `--dry-run` no longer close with a heavy `[OK]` block
   for an intermediate confirmation.** `AuditPresenter::scannedFiles()` and
   `AuditPresenter::dryRunResult()` (`src/Command/AuditPresenter.php`) used
