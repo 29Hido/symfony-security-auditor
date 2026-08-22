@@ -12,6 +12,45 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org). See
 
 ### Added
 
+- **`doctor` and `--version` now surface which `symfony/models-dev` pricing
+  snapshot is bundled.** A standalone install's cost figures (`--dry-run`, the
+  report's `Cost` line) come from whatever `symfony/models-dev` catalog was
+  newest on Packagist when that release's binary was built, with no way to see
+  which snapshot that is. `EnvironmentDoctor::diagnose()`
+  (`src/Command/EnvironmentDoctor.php`) gains a "Pricing catalog" check
+  reporting the installed version (`Composer\InstalledVersions`) and the
+  resolved catalog file, canonicalized through
+  `Symfony\Component\Filesystem\Path` — `InstalledVersions::getInstallPath()`
+  answers relative to the Composer directory, so the raw path printed a
+  `vendor/composer/../symfony/models-dev/…` detour at the user, and `realpath()`
+  cannot collapse it because it returns `false` for the `phar://` path a
+  packaged binary reports. The standalone binary's `--version` output now
+  appends it too, via a new `StandaloneApplication`
+  (`src/Standalone/StandaloneApplication.php`) overriding `getLongVersion()` —
+  the bare `Symfony\Component\Console\Application` used by
+  `StandaloneApplicationFactory` had no other extension point for this. The
+  `'symfony/models-dev'` package name now lives in one place,
+  `ModelsDevPricingProvider::CATALOG_PACKAGE` (made `public`);
+  `EnvironmentDoctor` and `StandaloneApplicationFactory` reference it instead of
+  each restating their own copy of the string. The check names the catalog
+  **file** it resolved, not just the packaged version, so it can never report a
+  snapshot the run is not actually pricing from once `self-update` starts
+  writing a refreshed catalog into the XDG cache directory — a new
+  `ModelsDevPricingProvider::effectiveCatalogPath()` is the single resolution
+  point both `loadCatalog()` and the check go through. An override path that
+  does not exist yet falls through to the packaged catalog instead of shadowing
+  it, so pointing the check at the refresh location before anything writes there
+  is safe. When neither an override nor a packaged catalog is readable, the
+  check warns as before.
+
+  The version and the path are reported together only when they describe the
+  same file. `InstalledVersions::getPrettyVersion()` describes the packaged
+  catalog and nothing else, so when the resolved path is a refreshed override —
+  whose contents came from upstream `main` at refresh time — the check names the
+  override and says the bundled package is unused, rather than stamping a
+  version onto a file that does not have it.
+  `ModelsDevPricingProvider::packagedCatalogPath()` (the former private
+  `defaultCatalogPath()`, now `public`) is what the check compares against.
 - **A clean run (zero findings) no longer leaves the reviewer step looking like
   it silently disappeared.** `ConsoleProgressReporter::onReviewStarted()` (and
   its `PlainProgressReporter` counterpart) only ever fired when the attacker
