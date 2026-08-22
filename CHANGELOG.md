@@ -12,6 +12,48 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org). See
 
 ### Added
 
+- **The console, Markdown, and HTML reports now show the audit's real cost, not
+  just token counts.** `RunAuditUseCase::buildCost()` already assembled an
+  `AuditCost` from the LLM provider's own per-call token usage, but
+  `ConsoleReportRenderer`, `MarkdownReportRenderer`, and `HtmlReportRenderer`
+  (`src/Audit/Infrastructure/Report/`) only ever rendered
+  `inputTokens()`/`outputTokens()`/`primaryModel()` — `estimatedCostUsd()` was
+  computed but never shown outside `--format=json`/`--format=sarif` or
+  `--dry-run`. All three renderers now show a `Cost` line labeled "published
+  rates" — the token counts are the provider's exact figures, but the USD
+  conversion comes from `symfony/models-dev`'s published pricing snapshot, which
+  can drift from a negotiated rate or an unpriced model. When tokens were
+  actually spent but the model has no published rate (a self-hosted or unlisted
+  model), the new `AuditCost::hasPublishedPricing()` flips the label to "no
+  published pricing, or a self-hosted model" instead of showing `$0.0000` as if
+  it were a genuinely free run — the same caveat `--dry-run` already gives via
+  `AuditPresenter::unsupportedModelWarnings()`.
+
+  The label is decided per model, not from the aggregate. A split
+  attacker/reviewer setup pairing a priced cloud attacker with an unpriced local
+  reviewer sums to a nonzero total, so the aggregate alone would report
+  "published rates" for a run that is half unpriced — the case this feature
+  exists to catch. `BudgetTracker` already prices every call at that call's own
+  model, so it now accumulates per-model totals alongside the running cost and
+  `RunAuditUseCase` attaches them to the `AuditCost` via the new
+  `AuditCost::withUsageByModel()`. `hasPublishedPricing()` checks whichever
+  breakdown it has — per model for a real run, per role for `--dry-run` — and
+  falls back to the aggregate only when there is none, which is correct on its
+  own terms because a single-model run has nothing to disaggregate.
+
+  Per-model rather than per-role because that is what a real run can honestly
+  attribute: it records the model of every call but not the agent that made it,
+  and it also covers models neither role owns — `EscalatingAttackerAgent`'s
+  cheap first pass, PoC and fix synthesis. The JSON report gains a `by_model`
+  object alongside the existing `by_role`; both are additive, and
+  `AuditCost::of()` is unchanged, so existing callers are unaffected. Each
+  `by_model` entry also carries `cache_read_tokens` and `cache_creation_tokens`,
+  because `CostCalculator::costForCall()` bills cached prompt traffic: without
+  them a cached run reported a cost its own token counts could not account for.
+  `AuditCost::hasPublishedPricing()` counts that traffic as spend too, so a
+  model whose whole run arrived from the prompt cache and priced to zero is
+  still reported as a pricing gap instead of passing as free. Both keys are
+  optional in the accepted shape, keeping `withUsageByModel()` callers valid.
 - **The CLI header now carries the project's identity, and renders the same way
   everywhere.** `AuditPresenter::header()` (`src/Command/AuditPresenter.php`)
   printed `$symfonyStyle->title('Symfony LLM Security Auditor')` — a plain
