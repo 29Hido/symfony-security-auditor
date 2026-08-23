@@ -176,6 +176,8 @@ use VinceAmstoutz\SymfonySecurityAuditor\Command\BaselineMerger;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\BaselineMergerInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\BaselineProcessor;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\BaselineProcessorInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\ConsoleBanner;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\ConsoleBannerInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\DiffCommand;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\DiffPresenter;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\DiffPresenterInterface;
@@ -386,6 +388,9 @@ return static function (ContainerConfigurator $containerConfigurator): void {
 
     $defaultsConfigurator->set(AuditExitCodeResolver::class);
     $defaultsConfigurator->alias(AuditExitCodeResolverInterface::class, AuditExitCodeResolver::class);
+
+    $defaultsConfigurator->set(ConsoleBanner::class);
+    $defaultsConfigurator->alias(ConsoleBannerInterface::class, ConsoleBanner::class);
 
     $defaultsConfigurator->set(AuditPresenter::class);
     $defaultsConfigurator->alias(AuditPresenterInterface::class, AuditPresenter::class);

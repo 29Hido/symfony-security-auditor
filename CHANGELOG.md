@@ -10,6 +10,77 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org). See
 
 ## [Unreleased]
 
+### Fixed
+
+- **The standalone binary now shows its identity banner on every command, not
+  only `audit`.** `AuditPresenter::header()` was its sole caller
+  (`src/Command/AuditCommand.php`), so `symfony-security-auditor --version`,
+  `-h`, `doctor`, `init` and `self-update --check` all opened with nothing
+  saying which binary was talking. The wordmark moved into a dedicated
+  `ConsoleBanner` (`src/Command/ConsoleBanner.php`) behind a
+  `ConsoleBannerInterface` port, and `StandaloneApplication::doRun()` renders it
+  before delegating to the base application — `--version` returns before any
+  command is resolved, so a `ConsoleEvents` listener could never have covered
+  it. It is written to stderr, so `--version` piped into a version check and
+  `list --format=json` keep a clean stdout.
+
+  Exactly one collaborator prints it per run, with no command-name special case:
+  `StandaloneContainerFactory` wires the audit command's own banner to
+  `NullConsoleBanner`, because in the binary the application has already printed
+  one by the time that command is even resolved. A bundle install is unchanged —
+  there `ConsoleBannerInterface` resolves to the real banner and `audit` prints
+  it itself, while the host application's own commands print nothing. The two
+  completion commands stay bare on every stream: `_complete` runs on every TAB
+  press and `completion` emits a script the shell evaluates.
+
+- **`--dry-run` no longer needs a provider credential in the standalone
+  binary.** `symfony-security-auditor audit <path> --dry-run` aborted before it
+  scanned a single file:
+
+  ```text
+  The environment variable "ANTHROPIC_API_KEY", referenced by your config, is not set.
+  ```
+
+  A dry run estimates cost from the scanned files and never reaches the
+  provider, so pricing a project should not have meant signing up for an API key
+  first. `StandalonePlatformConfigResolver::resolve()`
+  (`src/Audit/Infrastructure/Config/`) now takes a `$credentialsRequired` flag;
+  when it is off, an unresolved `%env(...)%` placeholder in the `platform` block
+  yields `UNNEEDED_CREDENTIAL` instead of throwing — a deliberately unusable
+  stand-in, so a code path that somehow reached the provider with it would be
+  rejected rather than billed to someone. `StandaloneApplication` reads
+  `--dry-run` off the raw invocation and answers `needsProviderCredentials()`
+  for the lazily-built audit command, because the failure it prevents happens
+  while that command is still being constructed. A real run is unchanged and
+  still refuses to start, as does `doctor`, whose whole job is to report the
+  missing key.
+
+- **The identity banner now carries the project homepage.** A third line under
+  the wordmark prints
+  `https://github.com/vinceAmstoutz/symfony-security-auditor` in grey, aligned
+  with the tagline, so a screenshot or a CI log carries a way back to the
+  project. Both lines share one `ConsoleBanner::alignedUnderWordmark()` helper,
+  so they track the scan mark's width together.
+
+- **A failed command now echoes the command line under the rendered error.**
+  Symfony's error block names the exception and the file but never the
+  invocation, which is the piece missing from a pasted CI log or bug report.
+  `StandaloneApplication::renderThrowable()`
+  (`src/Standalone/StandaloneApplication.php`) prints
+  `Command: symfony-security-auditor <args>` after the block, at
+  `VERBOSITY_QUIET` so `-q` keeps it, and run through
+  `OutputFormatter::escape()` so a path containing console markup cannot smuggle
+  styling into the output. Only a real command line is echoed — a programmatic
+  `ArrayInput` has no invocation to reproduce.
+
+- **The `--dry-run` caveat is a dimmed footnote instead of a framed `[NOTE]`
+  block.** `AuditPresenter::dryRunResult()` (`src/Command/AuditPresenter.php`)
+  used `SymfonyStyle::note()`, which frames the text full-width and runs a `!`
+  gutter down every wrapped line — weight that belongs to something the reader
+  must act on, not to a footnote about cache discounts. It now prints through
+  the same `caveat()` helper as the reviewer-ratio note beside it, so the two
+  read as one voice.
+
 ## [1.20.0] — 2026-08-22 — Ledger
 
 A release about knowing the real cost before you pay it, and trusting the binary
