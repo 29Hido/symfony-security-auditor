@@ -22,6 +22,8 @@ use Symfony\Component\Console\ConsoleEvents;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\EventDispatcher\EventDispatcher;
 use Symfony\Component\Filesystem\Filesystem;
+use Symfony\Component\Yaml\Exception\ParseException;
+use Symfony\Component\Yaml\Yaml;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Bridge\BridgeInstallerInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Bridge\ComposerBridgeInstaller;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\MalformedProjectConfigException;
@@ -31,14 +33,20 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\N
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\ProjectConfigPlatformOverrideException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\ProjectConfigScanOverrideException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\UnresolvableConfigPathException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\StandaloneConfig;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\StandaloneConfigFactory;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\StandaloneConfigLoader;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\StandalonePlatformConfigResolver;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\XdgConfigPathResolver;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\YamlStandaloneConfigWriter;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Pricing\ModelsDevPricingProvider;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Report\ReportPackage;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\FilesystemUpdateCheckStore;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\GitHubBinaryAssetResolver;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\ModelsDevCatalogRefresher;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\NullPricingCatalogRefresher;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\PendingBinarySwap;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\PricingCatalogRefresherInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\ProcessReleaseClient;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\RunningBinaryLocator;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\SelfUpdater;
@@ -74,7 +82,17 @@ final readonly class StandaloneApplicationFactory
         private string $runningBinaryPath = '',
         private string $pathEnvironment = '',
         private ?UpdateAvailabilityConsoleListener $updateAvailabilityConsoleListener = null,
+        private PendingBinarySwap $pendingBinarySwap = new PendingBinarySwap(),
     ) {}
+
+    /**
+     * The standalone entry point drains this on the way out, once the console
+     * application can no longer autoload from the archive being replaced.
+     */
+    public function pendingBinarySwap(): PendingBinarySwap
+    {
+        return $this->pendingBinarySwap;
+    }
 
     /**
      * @param array<string, string> $environment
@@ -84,6 +102,7 @@ final readonly class StandaloneApplicationFactory
         $xdgConfigPathResolver = self::resolverFromEnvironment($environment);
         $resolvedBinaryPath = $runningBinaryPath ?? '';
         $pathEnvironment = $environment['PATH'] ?? '';
+        $pendingBinarySwap = new PendingBinarySwap();
 
         return new self(
             new StandaloneConfigLoader(
@@ -100,7 +119,9 @@ final readonly class StandaloneApplicationFactory
                 $resolvedBinaryPath,
                 $pathEnvironment,
                 self::updateChecksDisabled($environment),
+                $pendingBinarySwap,
             ),
+            pendingBinarySwap: $pendingBinarySwap,
         );
     }
 
@@ -136,16 +157,16 @@ final readonly class StandaloneApplicationFactory
         return \sprintf('%s/vendor/autoload.php', self::resolverFromEnvironment($environment)->dataDir());
     }
 
-    public function create(): Application
+    public function create(): StandaloneApplication
     {
-        $application = new Application(self::APPLICATION_NAME, (new ReportPackage())->version());
-        $application->addCommand($this->initCommand());
-        $application->addCommand($this->selfUpdateCommand());
-        $application->addCommand($this->doctorCommand());
-        $application->addCommand($this->lazyAuditCommand());
-        $this->registerUpdateAvailabilityNotice($application);
+        $standaloneApplication = new StandaloneApplication(self::APPLICATION_NAME, (new ReportPackage())->version(), (new ReportPackage(ModelsDevPricingProvider::CATALOG_PACKAGE))->version());
+        $standaloneApplication->addCommand($this->initCommand());
+        $standaloneApplication->addCommand($this->selfUpdateCommand());
+        $standaloneApplication->addCommand($this->doctorCommand());
+        $standaloneApplication->addCommand($this->lazyAuditCommand());
+        $this->registerUpdateAvailabilityNotice($standaloneApplication);
 
-        return $application;
+        return $standaloneApplication;
     }
 
     private static function processWorkingDirectory(): ?string
@@ -176,18 +197,71 @@ final readonly class StandaloneApplicationFactory
     private function selfUpdateCommand(): SelfUpdateCommand
     {
         return new SelfUpdateCommand(
-            self::selfUpdater($this->runningBinaryPath, $this->pathEnvironment),
+            self::selfUpdater($this->runningBinaryPath, $this->pathEnvironment, $this->pendingBinarySwap, self::pricingCatalogRefresher($this->xdgConfigPathResolver)),
             (new ReportPackage())->version(),
+            self::updateCheckStore($this->xdgConfigPathResolver),
+            new NativeClock(),
         );
     }
 
-    private static function selfUpdater(string $runningBinaryPath, string $pathEnvironment): SelfUpdater
+    private static function selfUpdater(string $runningBinaryPath, string $pathEnvironment, PendingBinarySwap $pendingBinarySwap, PricingCatalogRefresherInterface $pricingCatalogRefresher = new NullPricingCatalogRefresher()): SelfUpdater
     {
         return new SelfUpdater(
             new ProcessReleaseClient(ProcessReleaseClient::defaultProcessBuilder()),
             new GitHubBinaryAssetResolver(\PHP_OS_FAMILY, php_uname('m')),
             new RunningBinaryLocator('/proc/self/exe', $runningBinaryPath, pathEnvironment: $pathEnvironment),
+            $pendingBinarySwap,
+            pricingCatalogRefresher: $pricingCatalogRefresher,
         );
+    }
+
+    /**
+     * `self-update` must keep working before "init" has ever run, so this
+     * never routes through `StandaloneConfigLoader::load()` — it would throw
+     * `MissingPlatformException` on a fresh install. A config file that is
+     * present but broken (an unresolvable home directory, malformed YAML)
+     * fails closed to skipping the refresh, same as `privacy.offline_only`
+     * being enabled on purpose. A fresh install with no config file yet has
+     * nothing to fail closed on, so it defaults to online.
+     */
+    public static function pricingCatalogRefresher(XdgConfigPathResolver $xdgConfigPathResolver): PricingCatalogRefresherInterface
+    {
+        if (self::offlineOnly($xdgConfigPathResolver)) {
+            return new NullPricingCatalogRefresher();
+        }
+
+        try {
+            $cacheDir = $xdgConfigPathResolver->cacheDir();
+        } catch (UnresolvableConfigPathException) {
+            return new NullPricingCatalogRefresher();
+        }
+
+        return new ModelsDevCatalogRefresher(
+            new ProcessReleaseClient(ProcessReleaseClient::defaultProcessBuilder()),
+            $cacheDir,
+            new NullLogger(),
+        );
+    }
+
+    private static function offlineOnly(XdgConfigPathResolver $xdgConfigPathResolver): bool
+    {
+        try {
+            $configFile = $xdgConfigPathResolver->configFile();
+        } catch (UnresolvableConfigPathException) {
+            return true;
+        }
+
+        if (!is_file($configFile)) {
+            return false;
+        }
+
+        try {
+            $parsed = Yaml::parseFile($configFile);
+        } catch (ParseException) {
+            return true;
+        }
+
+        return \is_array($parsed) && StandaloneConfig::offlineOnlyIn($parsed);
     }
 
     private static function updateAvailabilityConsoleListener(
@@ -195,16 +269,22 @@ final readonly class StandaloneApplicationFactory
         string $runningBinaryPath,
         string $pathEnvironment,
         bool $disabled,
+        PendingBinarySwap $pendingBinarySwap,
     ): UpdateAvailabilityConsoleListener {
         return new UpdateAvailabilityConsoleListener(
             new ThrottledUpdateAvailabilityNotifier(
-                self::selfUpdater($runningBinaryPath, $pathEnvironment),
-                new FilesystemUpdateCheckStore($xdgConfigPathResolver, new Filesystem(), new NullLogger()),
+                self::selfUpdater($runningBinaryPath, $pathEnvironment, $pendingBinarySwap),
+                self::updateCheckStore($xdgConfigPathResolver),
                 new NativeClock(),
             ),
             (new ReportPackage())->version(),
             $disabled,
         );
+    }
+
+    private static function updateCheckStore(XdgConfigPathResolver $xdgConfigPathResolver): FilesystemUpdateCheckStore
+    {
+        return new FilesystemUpdateCheckStore($xdgConfigPathResolver, new Filesystem(), new NullLogger());
     }
 
     private function registerUpdateAvailabilityNotice(Application $application): void
@@ -232,8 +312,23 @@ final readonly class StandaloneApplicationFactory
                     $this->standaloneContainerFactory,
                     $this->standaloneConsoleCommandFactory,
                 ),
+                new ModelsDevPricingProvider(new NullLogger(), $this->refreshedCatalogPath()),
             ),
         );
+    }
+
+    /**
+     * Where a refreshed pricing catalog lands. `doctor` builds its provider
+     * with the same override the audit container passes, so the two never
+     * disagree about which catalog file the run prices from.
+     */
+    private function refreshedCatalogPath(): ?string
+    {
+        try {
+            return \sprintf('%s/%s', $this->xdgConfigPathResolver->cacheDir(), ModelsDevPricingProvider::CATALOG_FILENAME);
+        } catch (UnresolvableConfigPathException) {
+            return null;
+        }
     }
 
     private function lazyAuditCommand(): LazyCommand
