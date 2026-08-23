@@ -10,6 +10,18 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org). See
 
 ## [Unreleased]
 
+## [1.20.0] — 2026-08-22 — Ledger
+
+A release about knowing the real cost before you pay it, and trusting the binary
+that pays it on your behalf. `--dry-run` now accounts for skill-prompt overhead,
+tool round-trip overhead, and PoC/fix synthesis — the gaps that made prior
+estimates undercount real spend — and reports the reviewer ratio as the rough
+heuristic it is rather than a peer figure. `self-update` now refreshes the
+bundled pricing catalog after replacing the binary and hardens the
+download-verify-swap sequence against corruption. SARIF artifact URIs are now
+percent-decoded correctly, and two more secret-scrubbing gaps (Basic-auth
+headers, Slack `xapp-` tokens) are closed.
+
 ### Added
 
 - **`--dry-run` now caveats the reviewer figure as a flat, pre-run heuristic.**
@@ -376,6 +388,31 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org). See
   `--check` had already shown the user the newer version. `SelfUpdateCommand`
   now records the version it observed, so the notice agrees from the next
   command onwards.
+- **`RegexCodeSlicer` could silently elide genuinely security-relevant code
+  after a heredoc whose body contains a line starting with the closing
+  identifier word.** `HeredocLineTracker::closeTrailer()`
+  (`src/Audit/Infrastructure/Scan/HeredocLineTracker.php`) matched any line
+  starting with the identifier as the close, with no constraint on what followed
+  it — so a body line like `SQL syntax note: uses index` inside a `<<<SQL` block
+  ended heredoc tracking two lines early. Every line after that false close
+  (including the actual tainted interpolation, e.g. `WHERE name = '$name'`) then
+  went through ordinary per-line elision instead of being retained verbatim,
+  replacing it with `// elided` whenever it didn't independently match a known
+  security token — hiding a real SQL-injection sink from the attacker LLM. The
+  trailer is now restricted to whitespace and the punctuation PHP actually
+  allows after a closing identifier (`;`, `,`, `)`, `]`), so a body line
+  followed by anything else is no longer mistaken for the close.
+- **A fully positional `#[Route(...)]` attribute silently dropped its `methods`
+  restriction.** `RouteAttributeParser::resolveRouteArgName()`
+  (`src/Audit/Infrastructure/Scan/RouteAttributeParser.php`) only mapped unnamed
+  arguments at position 0 (`path`) and 1 (`name`) — matching Symfony's own
+  `Route::__construct()` order for those two, but not for `methods`, which sits
+  at position 6. A controller action declaring
+  `#[Route('/admin/x', null, [], [], [], '', ['DELETE'])]` — valid, real-world
+  positional syntax — reported `routeMethods()` as `[]` instead of `['DELETE']`,
+  understating a DELETE-only admin route's actual method restriction to the
+  attacker/reviewer prompt and the access-control map. Position 6 now resolves
+  to `methods` as well.
 
 ### Security
 
@@ -393,6 +430,15 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org). See
   header or an assignment before the credential, so prose such as "use basic
   authentication over TLS" is left alone. `SecretPatternLabel` gains
   `BasicAuthorization`.
+- **A finding's `file` path could forge a fake section header in the PoC and fix
+  synthesis prompts.** `PoCSynthesizer::buildUserMessage()`
+  (`src/Audit/Application/Agent/PoCSynthesizer.php`) and
+  `FixSynthesizer::buildUserMessage()` escape every other narrative field —
+  `title`, `vulnerable_code`, `attack_vector`, `proof`, `remediation` — with
+  `escapeFences()` so a run of backticks or `#` can't forge a fake code fence or
+  a bogus `### SYSTEM OVERRIDE` heading, but `file` (attacker-controlled via
+  `record_vulnerability`'s unconstrained `file_path` input) only had its
+  newlines stripped. Both now also escape `file` through `escapeFences()`.
 
 ## [1.19.1] — 2026-08-13 — Lineage
 
@@ -4078,6 +4124,8 @@ CI test matrix: PHP 8.3 / 8.4 / 8.5 × Symfony 7.4 / 8.0 / 8.1.
 - Register bundle in `dev` and `test` environments only (per
   `config/bundles.php` guidance in the README).
 
+[1.20.0]:
+  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.20.0
 [1.19.1]:
   https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.19.1
 [1.19.0]:
